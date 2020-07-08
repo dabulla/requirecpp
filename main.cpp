@@ -26,7 +26,7 @@ public:
     {
         auto printVisitor = [this](auto &o)
         {
-            std::cout << m_prefix << " Registered: " << typeid (o).name() << " (" << o << ")" << std::endl;
+            std::cout << m_prefix << " Registered: " << typeid (o).name() << " (" << *o << ")" << std::endl;
         };
         // print Components of type int, double and string as soon as
         // they are registered or directly, if they exist
@@ -50,7 +50,7 @@ public:
         m_dr.registerExistingComponent(m_nameLabel);
         m_dr.require<PrintingComponent>([](auto &printer)
         {
-            printer.print("Player is using printer");
+            printer->print("Player is using printer");
         });
     }
 };
@@ -61,9 +61,9 @@ class Chat
 public:
     Chat()
     {
-        m_dr.require<PrintingComponent, PlayerNameLabel>([](auto &printer, auto &label)
+        m_dr.require<requirecpp::Unlocked<PrintingComponent>, PlayerNameLabel>([](auto &printer, auto &label)
         {
-            printer.print(label.getName() + " entered the room");
+            printer.print(label->getName() + " entered the room");
         });
     }
 };
@@ -79,6 +79,7 @@ void test()
 
 int main()
 {
+    using namespace requirecpp;
     try {
         std::cout << "Start DependencyReactor" << std::endl;
         requirecpp::DependencyReactor<App> depReact;
@@ -99,17 +100,18 @@ int main()
         // finally register Player, which will register PlayerNameLabel
         depReact.createComponent<Player>();
 
-        std::cout << "Name of Player: " << depReact.get<PlayerNameLabel>().getName() << std::endl;
+        std::cout << "Name of Player: " << depReact.get<PlayerNameLabel>()->getName() << std::endl;
+        std::cout << "Name of Player: " << depReact.get<Unlocked<PlayerNameLabel>>().getName() << std::endl;
 
-        depReact.require<int>([](int &){ std::cout << "Should never be called" << std::endl;});
+        depReact.require<Unlocked<int>>([](int &i){ std::cout << "Should never be called" << std::endl;});
 
         requirecpp::DependencyReactor<BasicTest> depReactBasic;
         // register a callback for int
-        depReactBasic.require<int>([](int &i){ std::cout << "Recognized an int " << i << " and increment it." << std::endl; i++;});
+        depReactBasic.require<Unlocked<int>>([](auto &i){ std::cout << "Recognized an int " << i << " and increment it." << std::endl; i++;});
         depReactBasic.createComponent<int>(333);
-        depReactBasic.require<int>([](auto &i){ std::cout << "After increment: " << i << std::endl;});
+        depReactBasic.require<Unlocked<int>>([](auto &i){ std::cout << "After increment: " << i << std::endl;});
         std::cout << "Register double dependency" << std::endl;
-        depReactBasic.require<int, double>([](int &i, double &d){ std::cout << "Having int and double " << i << " " << d << std::endl;});
+        depReactBasic.require<Unlocked<int>, Unlocked<double>>([](int &i, double &d){ std::cout << "Having int and double " << i << " " << d << std::endl;});
         std::cout << "Register double -> " << depReactBasic.exists<double>() << std::endl;
         depReactBasic.createComponent<double>(2.0);
         std::cout << "Does double exist? -> " << depReactBasic.exists<double>() << std::endl;

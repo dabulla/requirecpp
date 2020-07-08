@@ -22,6 +22,9 @@ struct ContextAssociated
      */
     template<typename T>
     static T* components;
+
+    template<typename T>
+    static std::shared_mutex componentReferenceMutex;
     // this should only prevent threading problems but allow registerComponent to recurse
     // (in ctor of Component another Component can be registered)
     static std::recursive_mutex componentsMutex;
@@ -104,11 +107,38 @@ public:
 
 
 template<typename T>
-class Finished : public T
+class Finished //: public T
 {
 public:
     using type = T;
-    operator T() const { return *this; }
+    //operator T() const { return *this; }
+};
+
+template<typename T>
+class Unlocked //: public T
+{
+public:
+    using type = T;
+    //operator T() const { return *this; }
+};
+
+template<typename Context, typename T>
+class ComponentReference
+{
+    T& m_t;
+    std::shared_lock<std::shared_mutex> m_lock;
+public:
+    using type = T;
+    operator T() { return m_t; }
+    operator T() const { return m_t; }
+    T* operator->() { return &m_t; }
+    T* operator->() const { return &m_t;  }
+    T& operator* () { return m_t; }
+    T& operator* () const { return m_t; }
+    ComponentReference(T& t, std::shared_lock<std::shared_mutex>&& lock)
+        :m_t{t}
+        ,m_lock{std::move(lock)}
+    {}
 };
 
 // use this to disable debugging information
@@ -176,6 +206,7 @@ public:
         {
             m_clear.emplace_back([]()
             {
+                std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
                 ContextAssociated<Context>::template components<T> = nullptr;
                 SelfAssociated<Self>::template componentsOwned<T>.reset();
             });
@@ -206,19 +237,11 @@ public:
         {
             throw std::runtime_error{"Called registerCompontent twice"};
         }
-        if (nullptr == SelfAssociated<Self>::template componentsOwned<T>)
+        m_clear.emplace_back([]()
         {
-            m_clear.emplace_back([]()
-            {
-                ContextAssociated<Context>::template components<T> = nullptr;
-                SelfAssociated<Self>::template componentsOwned<T>.reset();
-            });
-        }
-        else
-        {
-            // todo error, exists
-            return;
-        }
+            std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            ContextAssociated<Context>::template components<T> = nullptr;
+        });
         ContextAssociated<Context>::template components<T> = &comp;
         contextLock.unlock();
         std::scoped_lock depsLock{ContextAssociated<Context>::checkDependenciesMutex};
@@ -262,29 +285,70 @@ public:
     template <typename T>
     struct Get
     {
-        static T& get()
+        using type = ComponentReference<Context, T>;
+        static ComponentReference<Context, T> get()
         {
-            T* comp = ContextAssociated<Context>::template components<T>;
+            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            return {getUnlocked(), std::move(lk)};
+        }
+        static T& getUnlocked()
+        {
+            T *&comp = ContextAssociated<Context>::template components<T>;
             if(nullptr == comp) throw std::runtime_error{"Component Unknown"};
             return *comp;
         }
     };
     template <typename T>
+    struct Get<Unlocked<T>>
+    {
+        using type = T&;
+        static T& get() { return Get<T>::getUnlocked(); }
+        static T& getUnlocked() { return Get<T>::getUnlocked(); }
+    };
+    template <typename T>
     struct Get<Finished<T>>
     {
-        static T& get() { return Get<T>::get(); }
+        //using type = decltype(Get<T>::get()); // (Get<T>::template type)
+        //using get = std::invoke_result_t<Get<T>::get>; // (Get<T>::template type)
+        static auto get() { return Get<T>::get(); }
+        static T& getUnlocked() { return Get<T>::getUnlocked(); }
     };
 
-    template <class, template <class> class>
-    struct is_instance : public std::false_type {};
-
-    template <class T, template <class> class U>
-    struct is_instance<U<T>, U> : public std::true_type {};
-
     // get should be private
+    // Locked/Unlocked must be specified: unlocked is a reference. locked is not
+    // callbacks can get a reference to a locked
+    // while Finished is omitted in the callback, Unlocked is not. It can be deduced using auto, however, the lambda must dereference (use -> or *)
+//    template<typename T>
+//    static auto& getUnlocked()
+//    {
+//        return Get<T>::getUnlocked();
+//    }
+//    // T can be Finished<T>
+//    template<typename T>
+//    static auto getLocked() -> decltype(Get<T>::get())
+//    {
+//        return Get<T>::get();
+//    }
     template<typename T>
-    static auto& get()
+    static auto require() -> decltype(Get<T>::get())
     {
+        return Get<T>::get();
+    }
+
+    /**
+     *  requireUnlocked can be used when it is impossible, that DependencyReactor<Self> destructs during usage
+     */
+//    template<typename T>
+//    static auto& requireUnlocked()
+//    {
+//        return Get<T>::get();
+//    }
+
+    template<typename T>
+    static auto& require()
+    {
+
+        //ComponentReference<Context, Get<T>::type> ref{Get<T>::get()};
         return Get<T>::get();
     }
 
@@ -335,6 +399,7 @@ public:
             m_executeWhenFinished.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
         }
     }
+
     static std::string whatsMissing()
     {
         std::scoped_lock {ContextAssociated<Context>::whatsMissingMutex};
