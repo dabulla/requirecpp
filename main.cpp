@@ -18,7 +18,7 @@ public:
 
 class PrintingComponent
 {
-    iocdr::DependencyReactor<App, PrintingComponent> m_dr;
+    requirecpp::DependencyReactor<App, PrintingComponent> m_dr;
     std::string m_prefix;
 public:
     PrintingComponent(const std::string &prefix)
@@ -30,9 +30,9 @@ public:
         };
         // print Components of type int, double and string as soon as
         // they are registered or directly, if they exist
-        m_dr.executeWith<int>(printVisitor);
-        m_dr.executeWith<std::string>(printVisitor);
-        m_dr.executeWith<double>(printVisitor);
+        m_dr.require<int>(printVisitor);
+        m_dr.require<std::string>(printVisitor);
+        m_dr.require<double>(printVisitor);
     }
     void print(const std::string &message)
     {
@@ -42,13 +42,13 @@ public:
 
 class Player
 {
-    iocdr::DependencyReactor<App, Player> m_dr;
+    requirecpp::DependencyReactor<App, Player> m_dr;
 public:
     PlayerNameLabel m_nameLabel;
     Player()
     {
         m_dr.registerExistingComponent(m_nameLabel);
-        m_dr.executeWith<PrintingComponent>([](auto &printer)
+        m_dr.require<PrintingComponent>([](auto &printer)
         {
             printer.print("Player is using printer");
         });
@@ -57,11 +57,11 @@ public:
 
 class Chat
 {
-    iocdr::DependencyReactor<App, Chat> m_dr;
+    requirecpp::DependencyReactor<App, Chat> m_dr;
 public:
     Chat()
     {
-        m_dr.executeWith<PrintingComponent, PlayerNameLabel>([](auto &printer, auto &label)
+        m_dr.require<PrintingComponent, PlayerNameLabel>([](auto &printer, auto &label)
         {
             printer.print(label.getName() + " entered the room");
         });
@@ -70,39 +70,46 @@ public:
 
 class End{};
 
+class Test1 {};
+void test()
+{
+    requirecpp::DependencyReactor<Test1> depReact;
+    //depReact
+}
+
 int main()
 {
     try {
         std::cout << "Start DependencyReactor" << std::endl;
-        iocdr::DependencyReactor<App> depReact;
+        requirecpp::DependencyReactor<App> depReact;
 
         // when all dependecies for PrintingComponent, PlayerNameLabel, ... are satisfied, print a message
-        depReact.executeWhenFinished<PrintingComponent, PlayerNameLabel, Chat, double, int, End>(
+        depReact.require<PrintingComponent, PlayerNameLabel, Chat, double, int, End>(
                     [](const auto &...) { std::cout << "All dependencies have been satisfied" << std::endl; });
 
         // create PrintingComponent with a prefix.
         depReact.createComponent<PrintingComponent>(std::string{"printer ->"});
 
         // create a chat and print when all its dependecies are satisfied
-        depReact.executeWhenFinished<Chat>([](const auto &...) { std::cout << "Chat finished!" << std::endl; });
+        depReact.require<requirecpp::Finished<Chat>>([](const auto &...) { std::cout << "Chat finished!" << std::endl; });
         depReact.createComponent<Chat>();
         // Chat is not yet finished (it depends on PlayerNameLabel, which is not yet available). Print information about dependencies
-        std::cout << "State:\n" << iocdr::DependencyReactor<App>::whatsMissing() << std::endl;
+        std::cout << "State:\n" << requirecpp::DependencyReactor<App>::whatsMissing() << std::endl;
 
         // finally register Player, which will register PlayerNameLabel
         depReact.createComponent<Player>();
 
         std::cout << "Name of Player: " << depReact.get<PlayerNameLabel>().getName() << std::endl;
 
-        depReact.executeWith<int>([](int &){ std::cout << "Should never be called" << std::endl;});
+        depReact.require<int>([](int &){ std::cout << "Should never be called" << std::endl;});
 
-        iocdr::DependencyReactor<BasicTest> depReactBasic;
+        requirecpp::DependencyReactor<BasicTest> depReactBasic;
         // register a callback for int
-        depReactBasic.executeWith<int>([](int &i){ std::cout << "Recognized an int " << i << " and increment it." << std::endl; i++;});
+        depReactBasic.require<int>([](int &i){ std::cout << "Recognized an int " << i << " and increment it." << std::endl; i++;});
         depReactBasic.createComponent<int>(333);
-        depReactBasic.executeWith<int>([](auto &i){ std::cout << "After increment: " << i << std::endl;});
+        depReactBasic.require<int>([](auto &i){ std::cout << "After increment: " << i << std::endl;});
         std::cout << "Register double dependency" << std::endl;
-        depReactBasic.executeWith<int, double>([](int &i, double &d){ std::cout << "Having int and double " << i << " " << d << std::endl;});
+        depReactBasic.require<int, double>([](int &i, double &d){ std::cout << "Having int and double " << i << " " << d << std::endl;});
         std::cout << "Register double -> " << depReactBasic.exists<double>() << std::endl;
         depReactBasic.createComponent<double>(2.0);
         std::cout << "Does double exist? -> " << depReactBasic.exists<double>() << std::endl;

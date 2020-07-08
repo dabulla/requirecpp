@@ -58,12 +58,10 @@ struct SelfAssociated
      */
     template<typename T>
     static std::unique_ptr<T> componentsOwned;
-
-    static std::shared_mutex contextMutex;
 };
 }
 
-namespace iocdr {
+namespace requirecpp {
 
 class DependencyCallbackBase : public std::function<bool()>
 {
@@ -104,6 +102,15 @@ public:
     }
 };
 
+
+template<typename T>
+class Finished : public T
+{
+public:
+    using type = T;
+    operator T() const { return *this; }
+};
+
 // use this to disable debugging information
 //template <typename Context, typename ...Deps>
 //using CallbackImpl = std::function<bool()>
@@ -131,8 +138,8 @@ class DependencyReactor
 public:
     void checkDependecies()
     {
-        auto end1 = std::remove_if(m_executeWith.begin(), m_executeWith.end(), [](auto& cb){ return (*cb)();});
-        m_executeWith.erase(end1, m_executeWith.end());
+        auto end1 = std::remove_if(s_executeWith.begin(), s_executeWith.end(), [](auto& cb){ return (*cb)();});
+        s_executeWith.erase(end1, s_executeWith.end());
         auto end2 = std::remove_if(m_executeWhenFinished.begin(), m_executeWhenFinished.end(), [](auto& cb){ return (*cb)();});
         m_executeWhenFinished.erase(end2, m_executeWhenFinished.end());
     }
@@ -172,10 +179,6 @@ public:
                 ContextAssociated<Context>::template components<T> = nullptr;
                 SelfAssociated<Self>::template componentsOwned<T>.reset();
             });
-            m_visit.emplace_back([]()
-            {
-                return nullptr != SelfAssociated<Self>::template componentsOwned<T>;
-            });
         }
         else
         {
@@ -210,10 +213,6 @@ public:
                 ContextAssociated<Context>::template components<T> = nullptr;
                 SelfAssociated<Self>::template componentsOwned<T>.reset();
             });
-            m_visit.emplace_back([]()
-            {
-                return nullptr != SelfAssociated<Self>::template componentsOwned<T>;
-            });
         }
         else
         {
@@ -229,45 +228,68 @@ public:
         }
     }
 
+
+    template <typename ...Tail>
+    struct Exists
+    {
+        static bool exists() { return true;}
+    };
+    template <typename Dep, typename ...Tail>
+    struct Exists<Finished<Dep>, Tail...>
+    {
+        static bool exists()
+        {
+            return Exists<Dep>::exists() && DependencyReactor<Context, Dep>::s_executeWith.empty() && Exists<Tail...>::exists();
+        }
+    };
+    template <typename Dep, typename ...Tail>
+    struct Exists<Dep, Tail...>
+    {
+        static bool exists()
+        {
+            return nullptr != ContextAssociated<Context>::template components<Dep> && Exists<Tail...>::exists();
+        }
+    };
+
     // exists should be private, is not guarded
-    template<typename Dep>
+    template<typename ...Args>
     bool exists()
     {
-        return nullptr != ContextAssociated<Context>::template components<Dep>;
+        return Exists<Args...>::exists();
     }
 
-    // exists should be private, is not guarded
-    template<typename Dep, typename Dep2, typename ...Args>
-    bool exists()
-    {
-        return exists<Dep>() && exists<Dep2, Args...>();
-    }
 
-    // exists should be private, is not guarded
-    template<typename Dep>
-    bool finished()
+    template <typename T>
+    struct Get
     {
-        return nullptr != ContextAssociated<Context>::template components<Dep> && m_executeWith.empty();
-    }
+        static T& get()
+        {
+            T* comp = ContextAssociated<Context>::template components<T>;
+            if(nullptr == comp) throw std::runtime_error{"Component Unknown"};
+            return *comp;
+        }
+    };
+    template <typename T>
+    struct Get<Finished<T>>
+    {
+        static T& get() { return Get<T>::get(); }
+    };
 
-    // exists should be private, is not guarded
-    template<typename Dep, typename Dep2, typename ...Args>
-    bool finished()
-    {
-        return finished<Dep>() && finished<Dep2, Args...>();
-    }
+    template <class, template <class> class>
+    struct is_instance : public std::false_type {};
+
+    template <class T, template <class> class U>
+    struct is_instance<U<T>, U> : public std::true_type {};
 
     // get should be private
     template<typename T>
-    static T& get()
+    static auto& get()
     {
-        T* comp = ContextAssociated<Context>::template components<T>;
-        if(nullptr == comp) throw std::runtime_error{"Component Unknown"};
-        return *comp;
+        return Get<T>::get();
     }
 
     template<typename ...Deps, typename Callback>
-    void executeWith(Callback callback)
+    void require(Callback callback)
     {
         std::unique_lock contextLock{ContextAssociated<Context>::componentsMutex, std::try_to_lock};
         if(contextLock.owns_lock() && exists<Deps...>())
@@ -286,12 +308,12 @@ public:
                 return true;
             };
             std::scoped_lock contextLock{ContextAssociated<Context>::checkDependenciesMutex};
-            m_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
+            s_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
         }
     }
 
     template<typename ...Deps, typename Callback>
-    void executeWhenFinished(Callback callback)
+    void requireFinished(Callback callback)
     {
         std::unique_lock contextLock{ContextAssociated<Context>::componentsMutex, std::try_to_lock};
         if(contextLock.owns_lock() && finished<Deps...>())
@@ -329,11 +351,10 @@ public:
         }
         return missing;
     }
-
     std::string whatsMissingLocal() const
     {
         std::unordered_set<std::string> missing;
-        for (const CallbackEx& exec : m_executeWith)
+        for (const CallbackEx& exec : s_executeWith)
         {
             const auto other = exec->whatsMissing();
             missing.insert(other.cbegin(), other.cend());
@@ -370,16 +391,6 @@ public:
         return std::string{"\""} + typeid(Self).name() + "\" needs: " +  missingConcat + "; Not yet finished is: " + unfinishedConcat + ";";
     }
 
-//    size_t size() const
-//    {
-//        size_t sum = 0;
-//        for (auto&& visit : m_visit)
-//        {
-//            sum += visit() ? 1 : 0;
-//        }
-//        return sum;
-//    }
-
     ~DependencyReactor()
     {
         for (auto&& clear : m_clear)
@@ -390,14 +401,17 @@ public:
 private:
 
     std::vector<std::function<void()>> m_clear;
-    std::vector<std::function<bool()>> m_visit;
-    std::vector<CallbackEx> m_executeWith;
+    static std::vector<CallbackEx> s_executeWith;
     std::vector<CallbackEx> m_executeWhenFinished;
 //    std::vector<std::function<bool()>> m_executeWith;
 //    std::vector<std::function<bool()>> m_executeWhenFinished;
 
+    // There must only be one DependencyReactor for each combination of Context and Self
+    // using static members DependencyReactor can manage itself in the application without
+    // passing references.
     static bool s_exists;
     static std::mutex s_mutex;
+    template<typename, typename> friend class DependencyReactor;
 };
 
 template <typename Context, typename Self>
@@ -405,6 +419,9 @@ bool DependencyReactor<Context, Self>::s_exists = false;
 
 template <typename Context, typename Self>
 std::mutex DependencyReactor<Context, Self>::s_mutex{};
+
+template <typename Context, typename Self>
+std::vector<CallbackEx> DependencyReactor<Context, Self>::s_executeWith{};
 
 //template <typename Context, typename Self>
 //template<typename T>
