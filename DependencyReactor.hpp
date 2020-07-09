@@ -8,6 +8,7 @@
 #include <shared_mutex>
 #include <utility>
 #include <unordered_set>
+#include <condition_variable>
 
 namespace
 {
@@ -25,6 +26,8 @@ struct ContextAssociated
 
     template<typename T>
     static std::shared_mutex componentReferenceMutex;
+    template<typename T>
+    static std::condition_variable_any componentReferenceCondition;
     // this should only prevent threading problems but allow registerComponent to recurse
     // (in ctor of Component another Component can be registered)
     static std::recursive_mutex componentsMutex;
@@ -41,6 +44,12 @@ template<typename Context>
 template<typename T>
 T* ContextAssociated<Context>::components;
 template<typename Context>
+template<typename T>
+std::shared_mutex ContextAssociated<Context>::componentReferenceMutex;
+template<typename Context>
+template<typename T>
+std::condition_variable_any ContextAssociated<Context>::componentReferenceCondition;
+template<typename Context>
 std::recursive_mutex ContextAssociated<Context>::componentsMutex;
 
 template<typename Context>
@@ -53,15 +62,12 @@ std::vector<std::function<std::string()>> ContextAssociated<Context>::whatsMissi
 template<typename Context>
 std::mutex ContextAssociated<Context>::whatsMissingMutex;
 
-template<typename Self>
-struct SelfAssociated
-{
-    /**
-     * References to all Components reachable from the DependencyReactor, that was not registered by any other
-     */
-    template<typename T>
-    static std::unique_ptr<T> componentsOwned;
-};
+//template<typename Self>
+//struct SelfAssociated
+//{
+//    template<typename T>
+//    static std::unique_ptr<T> componentsOwned;
+//};
 }
 
 namespace requirecpp {
@@ -139,6 +145,10 @@ public:
         :m_t{t}
         ,m_lock{std::move(lock)}
     {}
+    ComponentReference(const ComponentReference& other) = delete; // no copy
+    ComponentReference(ComponentReference&& other) noexcept = delete; // no move
+    ComponentReference& operator=(const ComponentReference& other) = delete;  // no copy assign
+    ComponentReference& operator=(ComponentReference&& other) noexcept = delete;  // no move assign
 };
 
 // use this to disable debugging information
@@ -170,8 +180,8 @@ public:
     {
         auto end1 = std::remove_if(s_executeWith.begin(), s_executeWith.end(), [](auto& cb){ return (*cb)();});
         s_executeWith.erase(end1, s_executeWith.end());
-        auto end2 = std::remove_if(m_executeWhenFinished.begin(), m_executeWhenFinished.end(), [](auto& cb){ return (*cb)();});
-        m_executeWhenFinished.erase(end2, m_executeWhenFinished.end());
+        auto end2 = std::remove_if(s_executeWhenFinished.begin(), s_executeWhenFinished.end(), [](auto& cb){ return (*cb)();});
+        s_executeWhenFinished.erase(end2, s_executeWhenFinished.end());
     }
     DependencyReactor()
     {
@@ -185,8 +195,49 @@ public:
         std::scoped_lock {ContextAssociated<Context>::whatsMissingMutex};
         ContextAssociated<Context>::whatsMissing.emplace_back(std::bind(&DependencyReactor<Context, Self>::whatsMissingLocal, this));
     }
+    ~DependencyReactor()
+    {
+        std::unique_lock {s_mutex};
+        std::unique_lock {ContextAssociated<Context>::template componentsMutex};
+        for (auto&& clear : m_clear)
+        {
+            clear();
+        }
+        s_exists = false;
+    }
     DependencyReactor(const DependencyReactor& _other) = delete;
     DependencyReactor& operator=(const DependencyReactor& _other) = delete;
+
+    template < template <typename...> class Template, typename T >
+    struct is_specialization_of : std::false_type {};
+
+    template < template <typename...> class Template, typename... Args >
+    struct is_specialization_of< Template, Template<Args...> > : std::true_type {};
+
+    template<typename T>
+    void checkRegisterPreconditions()
+    {
+        static_assert(!std::is_same<Context, T>(), "Context cannot be registered");
+        static_assert(!is_specialization_of<Finished, T>(), "Do not decorate createComponent with Finished");
+        static_assert(!is_specialization_of<Unlocked, T>(), "Do not decorate createComponent with Unlocked");
+
+        if(Exists<T>::exists())
+        {
+            throw std::runtime_error{"Called registerCompontent twice"};
+        }
+        //std::cout << "register " << std::string(typeid(T).name()) << " in " << std::string(typeid(Context).name()) << " exists: " << Exists<T>::exists() << std::endl;
+    }
+    template<typename T>
+    void componentAdded()
+    {
+        //std::cout << "Notify " << std::string(typeid(T).name()) << " in " << std::string(typeid(Context).name()) << " exists: " << Exists<T>::exists() << std::endl;
+        ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
+        std::scoped_lock depsLock{ContextAssociated<Context>::checkDependenciesMutex};
+        for (auto&& notif : ContextAssociated<Context>::checkDependencies)
+        {
+            notif();
+        }
+    }
 
     /**
      *  register compontent of type T. Args are forwarded to construct T
@@ -194,68 +245,45 @@ public:
     template<typename T, typename ...Args>
     void createComponent(const Args&& ...args)
     {
-        static_assert(!std::is_same<Context, T>(), "Context cannot be registered");
-
-        std::unique_lock contextLock{ContextAssociated<Context>::componentsMutex};
-
-        if(nullptr != ContextAssociated<Context>::template components<T>)
+        std::unique_lock   {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+        checkRegisterPreconditions<T>();
+        auto& ownedComponent = DependencyReactor<Context, Self>::template s_componentsOwned<T>;
+        auto& component = ContextAssociated<Context>::template components<T>;
+        m_clear.emplace_back([&ownedComponent, &component]()
         {
-            throw std::runtime_error{"Called registerCompontent twice"};
-        }
-        if (nullptr == SelfAssociated<Self>::template componentsOwned<T>)
-        {
-            m_clear.emplace_back([]()
-            {
-                std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
-                ContextAssociated<Context>::template components<T> = nullptr;
-                SelfAssociated<Self>::template componentsOwned<T>.reset();
-            });
-        }
-        else
-        {
-            // todo error, exists
-            return;
-        }
-        SelfAssociated<Self>::template componentsOwned<T> = std::make_unique<T>(args...);
-        ContextAssociated<Context>::template components<T> = SelfAssociated<Self>::template componentsOwned<T>.get();
-        contextLock.unlock();
-        std::scoped_lock depsLock{ContextAssociated<Context>::checkDependenciesMutex};
-        for (auto&& notif : ContextAssociated<Context>::checkDependencies)
-        {
-            notif();
-        }
+            std::unique_lock {ContextAssociated<Context>::template componentReferenceMutex<T>};
+            component = nullptr;
+            ownedComponent.reset();
+        });
+        ownedComponent = std::make_unique<T>(args...);
+        ContextAssociated<Context>::template components<T> = ownedComponent.get();
+        lk.unlock();
+        componentAdded<T>();
     }
-
     template<typename T>
     void registerExistingComponent(T& comp)
     {
-        static_assert(!std::is_same<Context, T>(), "Context cannot be registered");
-
-        std::unique_lock contextLock{ContextAssociated<Context>::componentsMutex};
-
-        if(nullptr != ContextAssociated<Context>::template components<T>)
-        {
-            throw std::runtime_error{"Called registerCompontent twice"};
-        }
-        m_clear.emplace_back([]()
+        std::unique_lock   {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+        checkRegisterPreconditions<T>();
+        auto& component = ContextAssociated<Context>::template components<T>;
+        m_clear.emplace_back([&component]()
         {
             std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            ContextAssociated<Context>::template components<T> = nullptr;
+            std::unique_lock{ContextAssociated<Context>::template componentsMutex};
+            component = nullptr;
         });
-        ContextAssociated<Context>::template components<T> = &comp;
-        contextLock.unlock();
-        std::scoped_lock depsLock{ContextAssociated<Context>::checkDependenciesMutex};
-        for (auto&& notif : ContextAssociated<Context>::checkDependencies)
-        {
-            notif();
-        }
+        component = &comp;
+        lk.unlock();
+        componentAdded<T>();
     }
 
 
     template <typename ...Tail>
     struct Exists
     {
-        static bool exists() { return true;}
+        static bool exists() { return true; }
     };
     template <typename Dep, typename ...Tail>
     struct Exists<Finished<Dep>, Tail...>
@@ -263,6 +291,14 @@ public:
         static bool exists()
         {
             return Exists<Dep>::exists() && DependencyReactor<Context, Dep>::s_executeWith.empty() && Exists<Tail...>::exists();
+        }
+    };
+    template <typename Dep, typename ...Tail>
+    struct Exists<Unlocked<Dep>, Tail...>
+    {
+        static bool exists()
+        {
+            return Exists<Dep, Tail...>::exists();
         }
     };
     template <typename Dep, typename ...Tail>
@@ -285,15 +321,45 @@ public:
     template <typename T>
     struct Get
     {
-        using type = ComponentReference<Context, T>;
+        // fast, for internal usage, assume component exists, else throw
         static ComponentReference<Context, T> get()
         {
             std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
             return {getUnlocked(), std::move(lk)};
         }
+        // check existance in wait condition
+        static ComponentReference<Context, T> getSync()
+        {
+            // todo: think about deadlocks
+            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
+            ContextAssociated<Context>::template componentReferenceCondition<T>.wait(lk, []
+            {
+                why does it deadlock?
+                const auto ret = Exists<T>::exists();
+                //std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
+                return ret;
+            });
+            std::cout << "After wait cond lock " << std::string(typeid(T).name()) << std::endl;
+            return {getUnlocked(), std::move(lk)};
+        }
+        template <typename DurationType>
+        static ComponentReference<Context, T> timedGet(const DurationType &dur)
+        {
+            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            if(!ContextAssociated<Context>::template componentReferenceCondition<T>.wait_for(lk, dur, []
+            {
+                return Exists<T>::exists();
+            }))
+            {
+                throw std::runtime_error{"Component timeout"};
+            }
+            return {getUnlocked(), std::move(lk)};
+        }
+        // just throw if component does not exist
         static T& getUnlocked()
         {
-            T *&comp = ContextAssociated<Context>::template components<T>;
+            T* &comp = ContextAssociated<Context>::template components<T>;
             if(nullptr == comp) throw std::runtime_error{"Component Unknown"};
             return *comp;
         }
@@ -301,55 +367,33 @@ public:
     template <typename T>
     struct Get<Unlocked<T>>
     {
-        using type = T&;
         static T& get() { return Get<T>::getUnlocked(); }
+        // sync not supported yet for unlocked
+        static T& getSync() { return Get<T>::getUnlocked(); }
+        // timed not supported yet for unlocked and should not compile
+        //template <typename DurationType>
+        //static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(const DurationType &dur); }
         static T& getUnlocked() { return Get<T>::getUnlocked(); }
     };
     template <typename T>
     struct Get<Finished<T>>
     {
-        //using type = decltype(Get<T>::get()); // (Get<T>::template type)
-        //using get = std::invoke_result_t<Get<T>::get>; // (Get<T>::template type)
         static auto get() { return Get<T>::get(); }
+        static auto getSync() { return Get<T>::getSync(); }
+        template <typename DurationType>
+        static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(const DurationType &dur); }
+
         static T& getUnlocked() { return Get<T>::getUnlocked(); }
     };
 
-    // get should be private
-    // Locked/Unlocked must be specified: unlocked is a reference. locked is not
+    // Locked/Unlocked can be specified: unlocked is a reference. locked is not
     // callbacks can get a reference to a locked
     // while Finished is omitted in the callback, Unlocked is not. It can be deduced using auto, however, the lambda must dereference (use -> or *)
-//    template<typename T>
-//    static auto& getUnlocked()
-//    {
-//        return Get<T>::getUnlocked();
-//    }
-//    // T can be Finished<T>
-//    template<typename T>
-//    static auto getLocked() -> decltype(Get<T>::get())
-//    {
-//        return Get<T>::get();
-//    }
     template<typename T>
     static auto require() -> decltype(Get<T>::get())
     {
-        return Get<T>::get();
-    }
-
-    /**
-     *  requireUnlocked can be used when it is impossible, that DependencyReactor<Self> destructs during usage
-     */
-//    template<typename T>
-//    static auto& requireUnlocked()
-//    {
-//        return Get<T>::get();
-//    }
-
-    template<typename T>
-    static auto& require()
-    {
-
-        //ComponentReference<Context, Get<T>::type> ref{Get<T>::get()};
-        return Get<T>::get();
+        std::unique_lock {ContextAssociated<Context>::template componentsMutex};
+        return Get<T>::getSync();
     }
 
     template<typename ...Deps, typename Callback>
@@ -361,42 +405,18 @@ public:
             // avoid copying callback with this extra if
             // if lock could not be acquired, this might be executed in the ctor of a component.
             // in this case, execution is delayed until ctor finished.
-            callback(get<Deps>()...);
+            callback(require<Deps>()...);
         }
         else
         {
             auto cb = [this, callback]()
             {
                 if(!exists<Deps...>()) return false;
-                callback(get<Deps>()...);
+                callback(require<Deps>()...);
                 return true;
             };
             std::scoped_lock contextLock{ContextAssociated<Context>::checkDependenciesMutex};
             s_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
-        }
-    }
-
-    template<typename ...Deps, typename Callback>
-    void requireFinished(Callback callback)
-    {
-        std::unique_lock contextLock{ContextAssociated<Context>::componentsMutex, std::try_to_lock};
-        if(contextLock.owns_lock() && finished<Deps...>())
-        {
-            // avoid copying callback with this extra if
-            // if lock could not be acquired, this might be executed in the ctor of a component.
-            // in this case, execution is delayed until ctor finished.
-            callback(get<Deps>()...);
-        }
-        else
-        {
-            auto cb = [this, callback]()
-            {
-                if(!finished<Deps...>()) return false;
-                callback(get<Deps>()...);
-                return true;
-            };
-            std::scoped_lock contextLock{ContextAssociated<Context>::checkDependenciesMutex};
-            m_executeWhenFinished.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
         }
     }
 
@@ -437,7 +457,7 @@ public:
         }
 
         std::unordered_set<std::string> unfin;
-        for (const CallbackEx& exec : m_executeWhenFinished)
+        for (const CallbackEx& exec : s_executeWhenFinished)
         {
             const auto other = exec->whatsMissing();
             unfin.insert(other.cbegin(), other.cend());
@@ -456,18 +476,13 @@ public:
         return std::string{"\""} + typeid(Self).name() + "\" needs: " +  missingConcat + "; Not yet finished is: " + unfinishedConcat + ";";
     }
 
-    ~DependencyReactor()
-    {
-        for (auto&& clear : m_clear)
-        {
-            clear();
-        }
-    }
 private:
+    template<typename T>
+    static std::unique_ptr<T> s_componentsOwned;
 
     std::vector<std::function<void()>> m_clear;
     static std::vector<CallbackEx> s_executeWith;
-    std::vector<CallbackEx> m_executeWhenFinished;
+    static std::vector<CallbackEx> s_executeWhenFinished;
 //    std::vector<std::function<bool()>> m_executeWith;
 //    std::vector<std::function<bool()>> m_executeWhenFinished;
 
@@ -488,6 +503,8 @@ std::mutex DependencyReactor<Context, Self>::s_mutex{};
 template <typename Context, typename Self>
 std::vector<CallbackEx> DependencyReactor<Context, Self>::s_executeWith{};
 
+template <typename Context, typename Self>
+std::vector<CallbackEx> DependencyReactor<Context, Self>::s_executeWhenFinished{};
 //template <typename Context, typename Self>
 //template<typename T>
 //T* DependencyReactor<Context, Self>::components = nullptr;

@@ -1,5 +1,9 @@
 #include <iostream>
+#include <thread>
 #include "DependencyReactor.hpp"
+
+using namespace requirecpp;
+using namespace std::chrono_literals;
 
 // The only reason why this must actually be a well defined type is typeid(Self) for debugging
 class App {};
@@ -70,17 +74,80 @@ public:
 
 class End{};
 
-class Test1 {};
+class TestCaseA {};
+
+class SlowComponent
+{
+public:
+    void slowOperation()
+    {
+        std::cout << "slow operation started" << std::endl;
+        std::this_thread::sleep_for(20ms);
+        std::cout << "slow operation finished" << std::endl;
+    }
+};
+class UseSlowComponent
+{
+    requirecpp::DependencyReactor<TestCaseA, UseSlowComponent> m_dr;
+public:
+    void use()
+    {
+        m_dr.require<SlowComponent>([](auto &comp)
+        {
+            comp->slowOperation();
+        });
+    }
+};
+class RegisterSlowComponent
+{
+    requirecpp::DependencyReactor<TestCaseA, RegisterSlowComponent> m_dr;
+public:
+    RegisterSlowComponent()
+    {
+        m_dr.createComponent<SlowComponent>();
+    }
+};
+
+class TestThreadType {};
 void test()
 {
-    requirecpp::DependencyReactor<Test1> depReact;
-    //depReact
+    std::cout << "thread started" << std::endl;
+    std::thread t{[]()
+    {
+        requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
+        auto user = depReact.require<UseSlowComponent>();
+        user->use();
+//        depReact.require<UseSlowComponent>([](auto &user)
+//        {
+//            user->use();
+//        });
+    }};
+    std::this_thread::sleep_for(10ms);
+    {
+        requirecpp::DependencyReactor<TestCaseA> depReact;
+        depReact.createComponent<RegisterSlowComponent>();
+        depReact.createComponent<UseSlowComponent>();
+    }
+    if(t.joinable())
+    {
+        t.join();
+        std::cout << "thread finished" << std::endl;
+    }
+    std::cout << "End of test1" << std::endl;
 }
 
 int main()
 {
-    using namespace requirecpp;
     try {
+        std::cout << "Start Test1" << std::endl;
+        test();
+        test();
+        test();
+        test();
+        test();
+        test();
+        test();
+        return 0;
         std::cout << "Start DependencyReactor" << std::endl;
         requirecpp::DependencyReactor<App> depReact;
 
@@ -100,10 +167,10 @@ int main()
         // finally register Player, which will register PlayerNameLabel
         depReact.createComponent<Player>();
 
-        std::cout << "Name of Player: " << depReact.get<PlayerNameLabel>()->getName() << std::endl;
-        std::cout << "Name of Player: " << depReact.get<Unlocked<PlayerNameLabel>>().getName() << std::endl;
+        std::cout << "Name of Player: " << depReact.require<PlayerNameLabel>()->getName() << std::endl;
+        std::cout << "Name of Player: " << depReact.require<Unlocked<PlayerNameLabel>>().getName() << std::endl;
 
-        depReact.require<Unlocked<int>>([](int &i){ std::cout << "Should never be called" << std::endl;});
+        depReact.require<Unlocked<int>>([](int &){ std::cout << "Should never be called" << std::endl;});
 
         requirecpp::DependencyReactor<BasicTest> depReactBasic;
         // register a callback for int
