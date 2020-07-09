@@ -114,13 +114,20 @@ void test()
     std::cout << "thread started" << std::endl;
     std::thread t{[]()
     {
-        requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
-        auto user = depReact.require<UseSlowComponent>();
-        user->use();
+        try
+        {
+            requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
+            auto user = depReact.require<UseSlowComponent>();
+            user->use();
 //        depReact.require<UseSlowComponent>([](auto &user)
 //        {
 //            user->use();
 //        });
+        }
+        catch (const std::exception &e)
+        {
+            std::cout << "Exception in Thread: " << e.what() << std::endl;
+        }
     }};
     std::this_thread::sleep_for(10ms);
     {

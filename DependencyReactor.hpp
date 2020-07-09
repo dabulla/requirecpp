@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <shared_mutex>
+#include <mutex>
 #include <utility>
 #include <unordered_set>
 #include <condition_variable>
@@ -198,12 +199,12 @@ public:
     ~DependencyReactor()
     {
         std::unique_lock {s_mutex};
-        std::unique_lock {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock {ContextAssociated<Context>::componentsMutex};
+        s_exists = false;
         for (auto&& clear : m_clear)
         {
             clear();
         }
-        s_exists = false;
     }
     DependencyReactor(const DependencyReactor& _other) = delete;
     DependencyReactor& operator=(const DependencyReactor& _other) = delete;
@@ -245,33 +246,37 @@ public:
     template<typename T, typename ...Args>
     void createComponent(const Args&& ...args)
     {
-        std::unique_lock   {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock   {ContextAssociated<Context>::componentsMutex};
         std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
-        auto& ownedComponent = DependencyReactor<Context, Self>::template s_componentsOwned<T>;
+        std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::template s_componentsOwned<T>;
         auto& component = ContextAssociated<Context>::template components<T>;
-        m_clear.emplace_back([&ownedComponent, &component]()
+        m_clear.emplace_back([&ownedComp, &component]()
         {
+            // s_exists is now false, condition variable can terminate
+            ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
             std::unique_lock {ContextAssociated<Context>::template componentReferenceMutex<T>};
             component = nullptr;
-            ownedComponent.reset();
+            ownedComp.reset();
         });
-        ownedComponent = std::make_unique<T>(args...);
-        ContextAssociated<Context>::template components<T> = ownedComponent.get();
+        ownedComp = std::make_unique<T>(args...);
+        ContextAssociated<Context>::template components<T> = ownedComp.get();
         lk.unlock();
         componentAdded<T>();
     }
     template<typename T>
     void registerExistingComponent(T& comp)
     {
-        std::unique_lock   {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock   {ContextAssociated<Context>::componentsMutex};
         std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
         auto& component = ContextAssociated<Context>::template components<T>;
         m_clear.emplace_back([&component]()
         {
+            // s_exists is now false, condition variable can terminate
+            ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
             std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            std::unique_lock{ContextAssociated<Context>::template componentsMutex};
+            std::unique_lock{ContextAssociated<Context>::componentsMutex};
             component = nullptr;
         });
         component = &comp;
@@ -335,11 +340,10 @@ public:
             //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.wait(lk, []
             {
-                why does it deadlock?
-                const auto ret = Exists<T>::exists();
                 //std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
-                return ret;
+                return Exists<T>::exists() || !s_exists;
             });
+            if(!s_exists) throw std::runtime_error{"Component was never registered"};
             std::cout << "After wait cond lock " << std::string(typeid(T).name()) << std::endl;
             return {getUnlocked(), std::move(lk)};
         }
@@ -381,7 +385,7 @@ public:
         static auto get() { return Get<T>::get(); }
         static auto getSync() { return Get<T>::getSync(); }
         template <typename DurationType>
-        static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(const DurationType &dur); }
+        static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(dur); }
 
         static T& getUnlocked() { return Get<T>::getUnlocked(); }
     };
@@ -392,7 +396,7 @@ public:
     template<typename T>
     static auto require() -> decltype(Get<T>::get())
     {
-        std::unique_lock {ContextAssociated<Context>::template componentsMutex};
+        std::unique_lock {ContextAssociated<Context>::componentsMutex};
         return Get<T>::getSync();
     }
 
