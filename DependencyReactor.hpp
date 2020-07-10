@@ -29,6 +29,8 @@ struct ContextAssociated
     static std::shared_mutex componentReferenceMutex;
     template<typename T>
     static std::condition_variable_any componentReferenceCondition;
+
+    bool exists per compo
     // this should only prevent threading problems but allow registerComponent to recurse
     // (in ctor of Component another Component can be registered)
     static std::recursive_mutex componentsMutex;
@@ -249,7 +251,7 @@ public:
         std::unique_lock   {ContextAssociated<Context>::componentsMutex};
         std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
-        std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::template s_componentsOwned<T>;
+        std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
         auto& component = ContextAssociated<Context>::template components<T>;
         m_clear.emplace_back([&ownedComp, &component]()
         {
@@ -274,6 +276,7 @@ public:
         m_clear.emplace_back([&component]()
         {
             // s_exists is now false, condition variable can terminate
+            std::cout << "Destruct Component" << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
             std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<T>};
             std::unique_lock{ContextAssociated<Context>::componentsMutex};
@@ -497,6 +500,10 @@ private:
     static std::mutex s_mutex;
     template<typename, typename> friend class DependencyReactor;
 };
+
+template <typename Context, typename Self>
+template<typename T>
+std::unique_ptr<T> DependencyReactor<Context, Self>::s_componentsOwned;
 
 template <typename Context, typename Self>
 bool DependencyReactor<Context, Self>::s_exists = false;
