@@ -70,15 +70,22 @@ void testcase1()
             std::cout << "Exception in Thread: " << e.what() << std::endl << std::endl;
         }
     }};
-    std::this_thread::sleep_for(10ms);
+    try
     {
+        std::this_thread::sleep_for(10ms);
         requirecpp::DependencyReactor<TestCaseA> depReact;
         depReact.createComponent<RegisterSlowComponent>();
         depReact.createComponent<UseSlowComponent>();
-        //std::cout << "Done" << std::endl;
+        std::cout << "Dest" << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cout << "Exception: " << e.what() << std::endl << std::endl;
     }
     if(t.joinable())
     {
+        std::cout << "Join ";
         t.join();
     }
+    std::cout << "Fin" << std::endl;
 }

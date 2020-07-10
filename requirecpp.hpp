@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -135,7 +136,25 @@ public:
     }
 };
 
-/// Decorations ///
+/// Decorations for create/register ///
+
+/**
+ * Allows components to be unregistered and registered again.
+ * An owned component is unregistered when the owning DependecyReactor destructs
+ * Others can require the component during destruction. If it is a reregisterable
+ * component, calls to require will wait. If it is not a reregisterable component,
+ * the call to require will fail and throw.
+ * If the application hangs on exit due to
+ */
+template<typename T>
+class Reregisterable //: public T
+{
+public:
+    using type = T;
+    //operator T() const { return *this; }
+};
+
+/// Decoration for require ///
 
 template<typename T>
 class Finished //: public T
@@ -248,7 +267,13 @@ public:
     {
         std::unique_lock {s_mutex};
         //std::unique_lock {ContextAssociated<Context>::componentsMutex};
-        s_exists = false;
+        s_exists = false; // in clean, all blocking require() calls have to return
+        for (auto& cv : s_pendingRequires)
+        {
+            std::cout << "aborted require" << std::endl;
+            cv->notify_all();
+        }
+        s_pendingRequires.clear();
         for (auto&& clear : m_clear)
         {
             clear();
@@ -294,6 +319,7 @@ public:
     template<typename T, typename ...Args>
     void createComponent(const Args&& ...args)
     {
+        //std::unique_lock{s_mutex};
         //std::unique_lock   {ContextAssociated<Context>::componentsMutex};
         std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
@@ -303,13 +329,14 @@ public:
         {
             std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
             ContextAssociated<Context>::template unavailable<T> = true;
-            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T><< std::endl;
+            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
             ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lk, []()
             {
                 return 0 == ContextAssociated<Context>::template awaited<T>;
             });
-            component = nullptr;
+            std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+            component = nullptr; // breakpoint here and MinGW causes race condition
             ownedComp.reset();
             ContextAssociated<Context>::template unavailable<T> = false;
         });
@@ -321,6 +348,7 @@ public:
     template<typename T>
     void registerExistingComponent(T& comp)
     {
+        //std::unique_lock{s_mutex};
         //std::unique_lock   {ContextAssociated<Context>::componentsMutex};
         std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
@@ -330,12 +358,13 @@ public:
             // s_exists is now false, condition variable can terminate
             std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
             ContextAssociated<Context>::template unavailable<T> = true;
-            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T><< std::endl;
+            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
             ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lk, []()
             {
                 return 0 == ContextAssociated<Context>::template awaited<T>;
             });
+            std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             component = nullptr;
             // let blocking calls to require wait for reregistering this component
             ContextAssociated<Context>::template unavailable<T> = false;
@@ -400,17 +429,31 @@ public:
             std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
             //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
             ContextAssociated<Context>::template awaited<T>++;
-            auto decrementAwait = [](void*){ ContextAssociated<Context>::template awaited<T>--; };
+            if(ContextAssociated<Context>::template awaited<T> == 1)
+            {
+                s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceCondition<T>);
+                s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
+            }
+            auto decrementAwait = [](void*){
+                ContextAssociated<Context>::template awaited<T>--;
+                if(ContextAssociated<Context>::template awaited<T> == 0)
+                {
+                    s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
+                    s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceCondition<T>);
+                }
+                ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify clear
+            };
             std::unique_ptr<void, decltype(decrementAwait)> awaitGuard{(void*)1, decrementAwait };
             ContextAssociated<Context>::template componentReferenceCondition<T>.wait(lk, []
             {
-                std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T><< std::endl;
-                return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T>;
+                std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+                return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T> || !s_exists;
             });
             const bool componentAvailable = ContextAssociated<Context>::template unavailable<T>; // store result before notifying clear
+            const bool exists = s_exists;
             awaitGuard.reset(); // decrement await
-            ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify cleanup
-            if(componentAvailable) throw std::runtime_error{"Component was never registered"};
+            if(componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
+            if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
             return {getUnlocked(), std::move(lk)};
         }
         template <typename DurationType>
@@ -467,7 +510,14 @@ public:
     }
 
     template<typename ...Deps, typename Callback>
-    void require(Callback callback)
+    void require(const Callback &&callback)
+    {
+        //std::unique_lock{s_mutex};
+        _require<Deps...>(std::forward<const Callback &&>(callback));
+    }
+
+    template<typename ...Deps, typename Callback>
+    void _require(const Callback &&callback)
     {
 //        const auto locks = std::make_tuple(std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<Deps>, std::try_to_lock}...);
 //        //std::unique_lock contextLock{ContextAssociated<Context>::componentReferenceMutex<Deps>, std::try_to_lock}...;
@@ -557,6 +607,7 @@ private:
     static std::unique_ptr<T> s_componentsOwned;
 
     std::vector<std::function<void()>> m_clear;
+    static std::unordered_set<std::condition_variable_any*> s_pendingRequires;
     static std::vector<CallbackEx> s_executeWith;
     static std::vector<CallbackEx> s_executeWhenFinished;
 //    std::vector<std::function<bool()>> m_executeWith;
@@ -579,6 +630,9 @@ bool DependencyReactor<Context, Self>::s_exists = false;
 
 template <typename Context, typename Self>
 std::mutex DependencyReactor<Context, Self>::s_mutex{};
+
+template <typename Context, typename Self>
+std::unordered_set<std::condition_variable_any*> DependencyReactor<Context, Self>::s_pendingRequires{};
 
 template <typename Context, typename Self>
 std::vector<CallbackEx> DependencyReactor<Context, Self>::s_executeWith{};

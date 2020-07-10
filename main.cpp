@@ -85,8 +85,8 @@ int main()
         testcase1();
         testcase1();
         testcase1();
-        return 0;
         std::cout << "Start DependencyReactor" << std::endl;
+        return 0;
 //        requirecpp::DependencyReactor<App> depReact;
 
 //        // when all dependecies for PrintingComponent, PlayerNameLabel, ... are satisfied, print a message
