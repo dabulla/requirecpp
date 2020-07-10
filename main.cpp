@@ -1,6 +1,7 @@
 #include <iostream>
 #include <thread>
-#include "DependencyReactor.hpp"
+#include "requirecpp.hpp"
+#include "testcases.h"
 
 using namespace requirecpp;
 using namespace std::chrono_literals;
@@ -74,100 +75,16 @@ class App {};
 
 //class End{};
 
-class TestCaseA {};
-
-class SlowComponent
-{
-public:
-    void slowOperation()
-    {
-        std::cout << "slow operation started" << std::endl;
-        std::this_thread::sleep_for(20ms);
-        std::cout << "slow operation finished" << std::endl;
-    }
-};
-class UseSlowComponent
-{
-    requirecpp::DependencyReactor<TestCaseA, UseSlowComponent> m_dr;
-public:
-    void use()
-    {
-        std::cout << "require SlowOpe async" << std::endl;
-        m_dr.require<SlowComponent>([](const auto &comp)
-        {
-            comp->slowOperation();
-        });
-        std::cout << "require SlowOpe async done" << std::endl;
-    }
-};
-class RegisterSlowComponent
-{
-    requirecpp::DependencyReactor<TestCaseA, RegisterSlowComponent> m_dr;
-public:
-    RegisterSlowComponent()
-    {
-        std::cout << "register SlowComp" << std::endl;
-        m_dr.createComponent<SlowComponent>();
-        std::cout << "registered SlowComp" << std::endl;
-    }
-};
-
-class TestThreadType {};
-void test()
-{
-    std::cout << "thread started" << std::endl;
-    std::thread t{[]()
-    {
-        try
-        {
-            requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
-            std::cout << "thread require UseSlowComp" << std::endl;
-            auto user = depReact.require<UseSlowComponent>();
-            std::cout << "thread uses" << std::endl;
-            user->use();
-            std::cout << "thread used" << std::endl;
-//        depReact.require<UseSlowComponent>([](auto &user)
-//        {
-//            user->use();
-//        });
-        }
-        catch (const std::exception &e)
-        {
-            std::cout << "Exception in Thread: " << e.what() << std::endl;
-        }
-    }};
-    std::cout << "sleep" << std::endl;
-    std::this_thread::sleep_for(10ms);
-    std::cout << "slept" << std::endl;
-    {
-        std::cout << "new Reactor" << std::endl;
-        requirecpp::DependencyReactor<TestCaseA> depReact;
-        depReact.createComponent<RegisterSlowComponent>();
-        std::cout << "register UseSlowComponent" << std::endl;
-        depReact.createComponent<UseSlowComponent>();
-        std::cout << "registered slowComp destruct Reactor, RegisterSlowComp and UseSlow (reverse order)" << std::endl;
-        std::this_thread::sleep_for(10ms); //todo remove this sleep
-    }
-    if(t.joinable())
-    {
-        std::cout << "thread joins" << std::endl;
-        t.join();
-        std::cout << "thread finished" << std::endl;
-    }
-    std::cout << "End of test1" << std::endl;
-}
 
 int main()
 {
     try {
         std::cout << "Start Test1" << std::endl;
-        test();
-        test();
-        test();
-        test();
-        test();
-        test();
-        test();
+        testcase1();
+        testcase1();
+        testcase1();
+        testcase1();
+        testcase1();
         return 0;
         std::cout << "Start DependencyReactor" << std::endl;
 //        requirecpp::DependencyReactor<App> depReact;
@@ -208,6 +125,6 @@ int main()
     }
     catch(const std::exception &e)
     {
-        std::cout << "Exception: " << e.what() << std::endl;
+        std::cout << "EXCEPTION: " << e.what() << std::endl << std::endl;
     }
 }
