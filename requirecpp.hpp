@@ -166,18 +166,26 @@ public:
  * the call to require will fail and throw.
  * If the application hangs on exit due to
  */
+//template<typename T>
+//class Reregisterable //: public T
+//{
+//public:
+//    using type = T;
+//    //operator T() const { return *this; }
+//};
+
+/// Decoration for require ///
+
 template<typename T>
-class Reregisterable //: public T
+class Finished //: public T
 {
 public:
     using type = T;
     //operator T() const { return *this; }
 };
 
-/// Decoration for require ///
-
 template<typename T>
-class Finished //: public T
+class Lazy //: public T
 {
 public:
     using type = T;
@@ -238,7 +246,10 @@ public:
         unlock();
     }
     ComponentReference(const ComponentReference& other) = delete; // no copy
-    ComponentReference(ComponentReference&& other) noexcept = delete; // no move
+    ComponentReference(ComponentReference&& other) noexcept
+        :m_t{other.m_t},
+         m_lock{std::move(other.m_lock)}
+    {};
     ComponentReference& operator=(const ComponentReference& other) = delete;  // no copy assign
     ComponentReference& operator=(ComponentReference&& other) noexcept = delete;  // no move assign
     void unlock()
@@ -254,6 +265,36 @@ class ComponentReference<Context, Self, std::optional<std::reference_wrapper<T>>
 {};
 template<typename Context, typename Self, typename T>
 using ComponentOptionalReference = ComponentReference<Context, Self, std::optional<std::reference_wrapper<T>>>;
+
+template<typename Context, typename Self, typename T>
+class ComponentLazyReference
+{
+    std::optional<const ComponentReference<Context, Self, T>> m_t;
+    void get()
+    {
+        if(!m_t.has_value())
+            m_t.emplace(std::move(DependencyReactor<Context, Self>::template Get<T>::get()));
+            //m_t = std::move(std::make_optional<ComponentReference<Context, Self, T>>(std::move(DependencyReactor<Context, Self>::template Get<T>::get())));
+    }
+public:
+    using type = T;
+    operator T() { get(); return m_t.value(); }
+    operator T() const { get(); return m_t.value(); }
+    T* operator->() { get(); return m_t.value().operator->(); }
+    T* operator->() const { get(); return m_t.value().operator->();  }
+    T& operator* () { get(); return m_t.value().operator*(); }
+    T& operator* () const { get(); return m_t.value().operator*(); }
+    ComponentLazyReference() = default;
+    ~ComponentLazyReference() = default;
+    ComponentLazyReference(const ComponentLazyReference& other) = delete; // no copy
+    ComponentLazyReference(ComponentLazyReference&& other) noexcept = delete; // no move
+    ComponentLazyReference& operator=(const ComponentLazyReference& other) = delete;  // no copy assign
+    ComponentLazyReference& operator=(ComponentLazyReference&& other) noexcept = delete;  // no move assign
+    void unlock()
+    {
+        if(m_t.has_value()) m_t.unlock();
+    }
+};
 
 // use this to disable debugging information
 //template <typename Context, typename ...Deps>
@@ -458,14 +499,15 @@ public:
     template <typename T>
     struct Get
     {
-        // fast, for internal usage, assume component exists, else throw
-        static ComponentReference<Context, Self, T> get()
-        {
-            std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            return {getUnlocked(), std::move(lkComp)};
-        }
+//        // fast, for internal usage, assume component exists, else throw
+//        static ComponentReference<Context, Self, T> get()
+//        {
+//            std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+//            return {getUnlocked(), std::move(lkComp)};
+//        }
+//        static ComponentReference<Context, Self, T> getSync()
         // check existance in wait condition
-        static ComponentReference<Context, Self, T> getSync()
+        static ComponentReference<Context, Self, T> get()
         {
             std::unique_lock lk{s_mutex}; // guard s_pendingRequires (could be tighter)
             static_assert(!std::is_same<Self, T>(), "Don't require Self");
@@ -497,7 +539,7 @@ public:
             awaitGuard.reset(); // decrement await
             if(componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
             if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
-            return {getUnlocked(), std::move(lkComp)};
+            return {Get<Unlocked<T>>::get(), std::move(lkComp)};
         }
         template <typename DurationType>
         static ComponentReference<Context, Self, T> timedGet(const DurationType &dur)
@@ -510,36 +552,47 @@ public:
             {
                 throw std::runtime_error{"Component timeout"};
             }
-            return {getUnlocked(), std::move(lkComp)};
+            return {Get<Unlocked<T>>::get(), std::move(lkComp)};
         }
+    };
+    template <typename T>
+    struct Get<Unlocked<T>>
+    {
         // just throw if component does not exist
-        static T& getUnlocked()
+        static T& get()
         {
             T* &comp = ContextAssociated<Context>::template components<T>;
             if(nullptr == comp) throw std::runtime_error{"Component Unknown"};
             return *comp;
         }
     };
-    template <typename T>
-    struct Get<Unlocked<T>>
-    {
-        static T& get() { return Get<T>::getUnlocked(); }
-        // sync not supported yet for unlocked
-        static T& getSync() { return Get<T>::getUnlocked(); }
-        // timed not supported yet for unlocked and should not compile
-        //template <typename DurationType>
-        //static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(const DurationType &dur); }
-        static T& getUnlocked() { return Get<T>::getUnlocked(); }
-    };
+    // just remove Finished, independent of order
     template <typename T>
     struct Get<Finished<T>>
     {
         static auto get() { return Get<T>::get(); }
-        static auto getSync() { return Get<T>::getSync(); }
-        template <typename DurationType>
-        static auto timedGet(const DurationType &dur) { return Get<T>::timedGet(dur); }
-
-        static T& getUnlocked() { return Get<T>::getUnlocked(); }
+    };
+    // If Unlocked is first, remove Finished. Other combination works automatically
+    template <typename T>
+    struct Get<Unlocked<Finished<T>>>
+    {
+        static T& get() { return Get<Unlocked<T>>::get(); }
+    };
+    template <typename T>
+    struct Get<Lazy<T>>
+    {
+        static ComponentLazyReference<Context, Self, T> get()
+        {
+            return ComponentLazyReference<Context, Self, T>{};
+        }
+    };
+    template <typename T>
+    struct Get<Lazy<Finished<T>>>
+    {
+        static ComponentLazyReference<Context, Self, T> get()
+        {
+            return Get<Lazy<T>>::get();
+        }
     };
 
     // Locked/Unlocked can be specified: unlocked is a reference. locked is not
@@ -550,7 +603,7 @@ public:
     {
         // Todo: dont use blocking require/seyncGet in construction of createComponent
         //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
-        return Get<T>::getSync();
+        return Get<T>::get();
     }
 
     template<typename ...Deps, typename Callback>
@@ -671,6 +724,7 @@ private:
     static std::mutex s_mutex;
     template<typename, typename> friend class DependencyReactor;
     template<typename, typename, typename> friend class ComponentReference;
+    template<typename, typename, typename> friend class ComponentLazyReference;
 };
 
 template <typename Context, typename Self>

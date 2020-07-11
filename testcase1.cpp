@@ -75,15 +75,15 @@ void testcase1()
         {
             requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
             // sync, blocking version
-            auto user = depReact.require<UseSlowComponent>();
+            auto user = depReact.require<Lazy<UseSlowComponent>>();
             user->use(); // -> Add Require decorator "Lazy" to block on first usage
             // tell requirecpp the thread has started and all require calls have been issued
             depReact.createComponent<TestThreadType>();
             // async version
-            depReact.require<UseSlowComponent>([](const auto &user)
-            {
-                user->use();
-            });
+//            depReact.require<UseSlowComponent>([](const auto &user)
+//            {
+//                user->use();
+//            });
 
             std::cout << "cleanup TestcaseA" << std::endl;
         }
