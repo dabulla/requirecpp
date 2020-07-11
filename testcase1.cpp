@@ -40,6 +40,7 @@ public:
         });
     }
 };
+
 class RegisterSlowComponent
 {
     requirecpp::DependencyReactor<TestCaseA, RegisterSlowComponent> m_dr;
@@ -50,26 +51,57 @@ public:
     }
 };
 
+class CreatorObject
+{
+    requirecpp::DependencyReactor<TestCaseA, CreatorObject> m_dr;
+public:
+    CreatorObject()
+    {
+        std::this_thread::sleep_for(10ms);
+        m_dr.createComponent<RegisterSlowComponent>();
+        m_dr.createComponent<UseSlowComponent>();
+        std::cout << "Dest" << std::endl;
+    }
+};
+
 class TestThreadType {};
 void testcase1()
 {
     // root must always outlife all children Dependency reactors
     requirecpp::DependencyReactor<TestCaseA> depReact;
-    std::thread t{[]()
+
+    bool reqCalled = false;
+    std::mutex mtx;
+    std::condition_variable cv;
+    TestThreadType t2;
+    std::thread t{[&cv, &mtx, &reqCalled]()
     {
         try
         {
             requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
-            // What can happen?
-            // 1) require is called before createComponent
-            // 2) require is called after createComponent
-            // 3) require is called after destruction of component with container<Context> already destroyed
-            auto user = depReact.require<UseSlowComponent>();
-            user->use();
-//            depReact.require<UseSlowComponent>([](auto &user)
-//            {
-//                user->use();
-//            });
+            {
+                // async cases:
+                // 1) require is called before createComponent
+                // 2) require is called after createComponent
+                // 3) require is called after destruction of component with container<Context> already destroyed
+
+                // async version
+                depReact.require<UseSlowComponent>([](const auto &user)
+                {
+                    user->use();
+                });
+
+                // sync, blocking version
+                auto user = depReact.require<UseSlowComponent>();
+                std::unique_lock lk{mtx};
+                reqCalled = true;
+                lk.unlock();
+                cv.notify_one();
+                user->use();
+            }
+            std::unique_lock lk{mtx};
+            cv.wait(lk, [&reqCalled]{return !reqCalled;});
+            std::cout << "cleanup TestcaseA" << std::endl;
         }
         catch (const std::exception &e)
         {
@@ -78,10 +110,15 @@ void testcase1()
     }};
     try
     {
-        std::this_thread::sleep_for(10ms);
-        depReact.createComponent<RegisterSlowComponent>();
-        depReact.createComponent<UseSlowComponent>();
-        std::cout << "Dest" << std::endl;
+        CreatorObject c{};
+        std::unique_lock lk{mtx};
+        cv.wait(lk, [&reqCalled]{ return reqCalled;});
+        std::cout << "waited" << std::endl;
+        depReact.registerExistingComponent<TestThreadType>(t2);
+        depReact.require<Finished<TestThreadType>>();
+        reqCalled = false;
+        cv.notify_one();
+        std::cout << "require Finished" << std::endl;
     }
     catch (const std::exception &e)
     {

@@ -210,7 +210,10 @@ public:
     //operator T() const { return *this; }
 };
 
-template<typename Context, typename T>
+template <typename Context, typename Self>
+class DependencyReactor;
+
+template<typename Context, typename Self, typename T>
 class ComponentReference
 {
     T& m_t;
@@ -226,18 +229,26 @@ public:
     ComponentReference(T& t, std::shared_lock<std::shared_mutex>&& lock)
         :m_t{t}
         ,m_lock{std::move(lock)}
-    {}
+    {
+        std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
+        DependencyReactor<Context, Self>::s_lockedComponents.insert(&m_lock);
+    }
+    ~ComponentReference()
+    {
+        std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
+        DependencyReactor<Context, Self>::s_lockedComponents.erase(&m_lock);
+    }
     ComponentReference(const ComponentReference& other) = delete; // no copy
     ComponentReference(ComponentReference&& other) noexcept = delete; // no move
     ComponentReference& operator=(const ComponentReference& other) = delete;  // no copy assign
     ComponentReference& operator=(ComponentReference&& other) noexcept = delete;  // no move assign
 };
 
-template<typename Context, typename T>
-class ComponentReference<Context, std::optional<std::reference_wrapper<T>>> : public std::optional<std::reference_wrapper<T>>
+template<typename Context, typename Self, typename T>
+class ComponentReference<Context, Self, std::optional<std::reference_wrapper<T>>> : public std::optional<std::reference_wrapper<T>>
 {};
-template<typename Context, typename T>
-using ComponentOptionalReference = ComponentReference<Context, std::optional<std::reference_wrapper<T>>>;
+template<typename Context, typename Self, typename T>
+using ComponentOptionalReference = ComponentReference<Context, Self, std::optional<std::reference_wrapper<T>>>;
 
 // use this to disable debugging information
 //template <typename Context, typename ...Deps>
@@ -341,7 +352,7 @@ public:
     template<typename T, typename ...Args>
     void createComponent(const Args&& ...args)
     {
-        //std::unique_lock lk{s_mutex};
+        std::unique_lock lk{s_mutex}; // guard s_lockdComponents
         //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
         std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
@@ -360,7 +371,7 @@ public:
             std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             component = nullptr; // breakpoint here and MinGW causes race condition
             ownedComp.reset();
-            ContextAssociated<Context>::template unavailable<T> = false;
+            ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
         });
         ownedComp = std::make_unique<T>(args...);
         ContextAssociated<Context>::template components<T> = ownedComp.get();
@@ -389,7 +400,7 @@ public:
             std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             component = nullptr;
             // let blocking calls to require wait for reregistering this component
-            ContextAssociated<Context>::template unavailable<T> = false;
+            ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
         });
         component = &comp;
         lkComp.unlock();
@@ -407,7 +418,10 @@ public:
     {
         static bool exists()
         {
-            return Exists<Dep>::exists() && DependencyReactor<Context, Dep>::s_executeWith.empty() && Exists<Tail...>::exists();
+            std::shared_lock lk{DependencyReactor<Context, Self>::s_lockedComponentsMutex};
+            const bool fin = DependencyReactor<Context, Self>::s_lockedComponents.empty();
+            lk.unlock();
+            return Exists<Dep>::exists() && fin && Exists<Tail...>::exists();
         }
     };
     // exists never locks
@@ -440,14 +454,15 @@ public:
     struct Get
     {
         // fast, for internal usage, assume component exists, else throw
-        static ComponentReference<Context, T> get()
+        static ComponentReference<Context, Self, T> get()
         {
             std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             return {getUnlocked(), std::move(lkComp)};
         }
         // check existance in wait condition
-        static ComponentReference<Context, T> getSync()
+        static ComponentReference<Context, Self, T> getSync()
         {
+            std::unique_lock lk{s_mutex}; // guard s_pendingRequires (could be tighter)
             static_assert(!std::is_same<Self, T>(), "Don't require Self");
             std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
@@ -455,13 +470,13 @@ public:
             if(ContextAssociated<Context>::template awaited<T> == 1)
             {
                 s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceCondition<T>);
-                s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
+                //s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
             }
             auto decrementAwait = [](void*){
                 ContextAssociated<Context>::template awaited<T>--;
                 if(ContextAssociated<Context>::template awaited<T> == 0)
                 {
-                    s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
+                    //s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceConditionBack<T>);
                     s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceCondition<T>);
                 }
                 ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify clear
@@ -480,7 +495,7 @@ public:
             return {getUnlocked(), std::move(lkComp)};
         }
         template <typename DurationType>
-        static ComponentReference<Context, T> timedGet(const DurationType &dur)
+        static ComponentReference<Context, Self, T> timedGet(const DurationType &dur)
         {
             std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             if(!ContextAssociated<Context>::template componentReferenceCondition<T>.wait_for(lkComp, dur, []
@@ -637,17 +652,30 @@ private:
 //    std::vector<std::function<bool()>> m_executeWith;
 //    std::vector<std::function<bool()>> m_executeWhenFinished;
 
+//    static site_t hash(const std::reference_wrapper<std::shared_lock<std::shared_mutex>>& o )
+//    {
+
+//    }
+    static std::shared_mutex s_lockedComponentsMutex;
+    static std::unordered_set<std::shared_lock<std::shared_mutex>*> s_lockedComponents;
+
     // There must only be one DependencyReactor for each combination of Context and Self
     // using static members DependencyReactor can manage itself in the application without
     // passing references.
     static bool s_exists;
     static std::mutex s_mutex;
     template<typename, typename> friend class DependencyReactor;
+    template<typename, typename, typename> friend class ComponentReference;
 };
 
 template <typename Context, typename Self>
 template<typename T>
 std::unique_ptr<T> DependencyReactor<Context, Self>::s_componentsOwned;
+
+template <typename Context, typename Self>
+std::shared_mutex DependencyReactor<Context, Self>::s_lockedComponentsMutex;
+template <typename Context, typename Self>
+std::unordered_set<std::shared_lock<std::shared_mutex>*> DependencyReactor<Context, Self>::s_lockedComponents;
 
 template <typename Context, typename Self>
 bool DependencyReactor<Context, Self>::s_exists = false;
