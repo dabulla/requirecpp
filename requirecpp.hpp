@@ -16,7 +16,7 @@
 
 namespace
 {
-
+// todo: simlify by replace some mutexes by synchronized_value, semaphore
 
 template<typename Context>
 struct ContextAssociated
@@ -51,6 +51,17 @@ struct ContextAssociated
 
     static std::vector<std::function<std::string()>> whatsMissing;
     static std::mutex whatsMissingMutex;
+
+//    // NYI: not needed, if root context survives all children, advanced error detection
+//    // Values indicating if the root/main context is beeing created/destroyed.
+//    // this is needed to finally stop all pending blocked calls to require.
+//    static bool s_exists;
+//    static std::mutex s_existsMutex;
+
+//    // NYI: not needed, if root context survives all children, advanced error detection
+//    // stop all pending requires that have never been statisfied
+//    // when closing root container
+//    static std::vector<void()> s_notifyKill;
 };
 
 template<typename Context>
@@ -86,6 +97,15 @@ template<typename Context>
 std::vector<std::function<std::string()>> ContextAssociated<Context>::whatsMissing;
 template<typename Context>
 std::mutex ContextAssociated<Context>::whatsMissingMutex;
+
+//template<typename Context>
+//bool ContextAssociated<Context>::s_exists;
+
+//template<typename Context>
+//std::mutex ContextAssociated<Context>::s_existsMutex;
+
+//template<typename Context>
+//std::vector<void()> ContextAssociated<Context>::s_notifyKill;
 
 //template<typename Self>
 //struct SelfAssociated
@@ -253,21 +273,23 @@ public:
     }
     DependencyReactor()
     {
-        std::unique_lock staticLock{s_mutex};
+        std::unique_lock lk{s_mutex};
         if(s_exists) throw std::runtime_error{"Only one DependencyReactor per class allowed"};
         s_exists = true;
-        staticLock.unlock();
-        std::scoped_lock {ContextAssociated<Context>::checkDependenciesMutex};
+        //if constexpr(std::is_same<Context, Self>()) ContextAssociated<Context>::s_exists = true;
+        lk.unlock();
+        std::scoped_lock lkCheckDeps{ContextAssociated<Context>::checkDependenciesMutex};
         ContextAssociated<Context>::checkDependencies.emplace_back(std::bind(&DependencyReactor<Context, Self>::checkDependecies, this));
 
-        std::scoped_lock {ContextAssociated<Context>::whatsMissingMutex};
+        std::scoped_lock lkMiss{ContextAssociated<Context>::whatsMissingMutex};
         ContextAssociated<Context>::whatsMissing.emplace_back(std::bind(&DependencyReactor<Context, Self>::whatsMissingLocal, this));
     }
     ~DependencyReactor()
     {
-        std::unique_lock {s_mutex};
+        std::unique_lock lk{s_mutex};
         //std::unique_lock {ContextAssociated<Context>::componentsMutex};
         s_exists = false; // in clean, all blocking require() calls have to return
+        //if constexpr(std::is_same<Context, Self>()) ContextAssociated<Context>::s_exists = false;
         for (auto& cv : s_pendingRequires)
         {
             std::cout << "aborted require" << std::endl;
@@ -306,7 +328,7 @@ public:
     {
         //std::cout << "Notify " << std::string(typeid(T).name()) << " in " << std::string(typeid(Context).name()) << " exists: " << Exists<T>::exists() << std::endl;
         ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
-        std::scoped_lock depsLock{ContextAssociated<Context>::checkDependenciesMutex};
+        std::scoped_lock lkCheckDeps{ContextAssociated<Context>::checkDependenciesMutex};
         for (auto&& checkDep : ContextAssociated<Context>::checkDependencies)
         {
             checkDep();
@@ -319,19 +341,19 @@ public:
     template<typename T, typename ...Args>
     void createComponent(const Args&& ...args)
     {
-        //std::unique_lock{s_mutex};
-        //std::unique_lock   {ContextAssociated<Context>::componentsMutex};
-        std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+        //std::unique_lock lk{s_mutex};
+        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
+        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
         std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
         auto& component = ContextAssociated<Context>::template components<T>;
         m_clear.emplace_back([&ownedComp, &component]() // < todo: make this use static vars, find way to fix race condition, find better synchronozation that with condition_variable ping/pong
         {
-            std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             ContextAssociated<Context>::template unavailable<T> = true;
             std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
-            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lk, []()
+            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
             {
                 return 0 == ContextAssociated<Context>::template awaited<T>;
             });
@@ -342,25 +364,25 @@ public:
         });
         ownedComp = std::make_unique<T>(args...);
         ContextAssociated<Context>::template components<T> = ownedComp.get();
-        lk.unlock();
+        lkComp.unlock();
         componentAdded<T>();
     }
     template<typename T>
     void registerExistingComponent(T& comp)
     {
-        //std::unique_lock{s_mutex};
-        //std::unique_lock   {ContextAssociated<Context>::componentsMutex};
-        std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+        //std::unique_lock lk{s_mutex};
+        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
+        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
         auto& component = ContextAssociated<Context>::template components<T>;
         m_clear.emplace_back([&component]()
         {
             // s_exists is now false, condition variable can terminate
-            std::unique_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             ContextAssociated<Context>::template unavailable<T> = true;
             std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
             ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
-            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lk, []()
+            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
             {
                 return 0 == ContextAssociated<Context>::template awaited<T>;
             });
@@ -370,7 +392,7 @@ public:
             ContextAssociated<Context>::template unavailable<T> = false;
         });
         component = &comp;
-        lk.unlock();
+        lkComp.unlock();
         componentAdded<T>();
     }
 
@@ -420,13 +442,14 @@ public:
         // fast, for internal usage, assume component exists, else throw
         static ComponentReference<Context, T> get()
         {
-            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            return {getUnlocked(), std::move(lk)};
+            std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            return {getUnlocked(), std::move(lkComp)};
         }
         // check existance in wait condition
         static ComponentReference<Context, T> getSync()
         {
-            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            static_assert(!std::is_same<Self, T>(), "Don't require Self");
+            std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
             //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
             ContextAssociated<Context>::template awaited<T>++;
             if(ContextAssociated<Context>::template awaited<T> == 1)
@@ -444,7 +467,7 @@ public:
                 ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify clear
             };
             std::unique_ptr<void, decltype(decrementAwait)> awaitGuard{(void*)1, decrementAwait };
-            ContextAssociated<Context>::template componentReferenceCondition<T>.wait(lk, []
+            ContextAssociated<Context>::template componentReferenceCondition<T>.wait(lkComp, []
             {
                 std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
                 return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T> || !s_exists;
@@ -454,20 +477,20 @@ public:
             awaitGuard.reset(); // decrement await
             if(componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
             if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
-            return {getUnlocked(), std::move(lk)};
+            return {getUnlocked(), std::move(lkComp)};
         }
         template <typename DurationType>
         static ComponentReference<Context, T> timedGet(const DurationType &dur)
         {
-            std::shared_lock lk{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            if(!ContextAssociated<Context>::template componentReferenceCondition<T>.wait_for(lk, dur, []
+            std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+            if(!ContextAssociated<Context>::template componentReferenceCondition<T>.wait_for(lkComp, dur, []
             {
                 return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T>;
             }))
             {
                 throw std::runtime_error{"Component timeout"};
             }
-            return {getUnlocked(), std::move(lk)};
+            return {getUnlocked(), std::move(lkComp)};
         }
         // just throw if component does not exist
         static T& getUnlocked()
@@ -505,14 +528,15 @@ public:
     template<typename T>
     static auto require() -> decltype(Get<T>::get())
     {
-        //std::unique_lock {ContextAssociated<Context>::componentsMutex};
+        // Todo: dont use blocking require/seyncGet in construction of createComponent
+        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
         return Get<T>::getSync();
     }
 
     template<typename ...Deps, typename Callback>
     void require(const Callback &&callback)
     {
-        //std::unique_lock{s_mutex};
+        //std::unique_lock lk{s_mutex};
         _require<Deps...>(std::forward<const Callback &&>(callback));
     }
 
@@ -540,7 +564,7 @@ public:
             };
             if(!cb())
             {
-                std::scoped_lock contextLock{ContextAssociated<Context>::checkDependenciesMutex};
+                std::scoped_lock lkCheckDeps{ContextAssociated<Context>::checkDependenciesMutex};
                 s_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
             }
 //        }
@@ -548,7 +572,7 @@ public:
 
     static std::string whatsMissing()
     {
-        std::scoped_lock {ContextAssociated<Context>::whatsMissingMutex};
+        std::scoped_lock lkMiss{ContextAssociated<Context>::whatsMissingMutex};
         std::string missing{" "};
         for (auto&& notif : ContextAssociated<Context>::whatsMissing)
         {

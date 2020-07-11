@@ -53,11 +53,17 @@ public:
 class TestThreadType {};
 void testcase1()
 {
+    // root must always outlife all children Dependency reactors
+    requirecpp::DependencyReactor<TestCaseA> depReact;
     std::thread t{[]()
     {
         try
         {
             requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
+            // What can happen?
+            // 1) require is called before createComponent
+            // 2) require is called after createComponent
+            // 3) require is called after destruction of component with container<Context> already destroyed
             auto user = depReact.require<UseSlowComponent>();
             user->use();
 //            depReact.require<UseSlowComponent>([](auto &user)
@@ -73,7 +79,6 @@ void testcase1()
     try
     {
         std::this_thread::sleep_for(10ms);
-        requirecpp::DependencyReactor<TestCaseA> depReact;
         depReact.createComponent<RegisterSlowComponent>();
         depReact.createComponent<UseSlowComponent>();
         std::cout << "Dest" << std::endl;
