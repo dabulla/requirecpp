@@ -235,13 +235,18 @@ public:
     }
     ~ComponentReference()
     {
-        std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
-        DependencyReactor<Context, Self>::s_lockedComponents.erase(&m_lock);
+        unlock();
     }
     ComponentReference(const ComponentReference& other) = delete; // no copy
     ComponentReference(ComponentReference&& other) noexcept = delete; // no move
     ComponentReference& operator=(const ComponentReference& other) = delete;  // no copy assign
     ComponentReference& operator=(ComponentReference&& other) noexcept = delete;  // no move assign
+    void unlock()
+    {
+        std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
+        DependencyReactor<Context, Self>::s_lockedComponents.erase(&m_lock);
+        m_lock.unlock();
+    }
 };
 
 template<typename Context, typename Self, typename T>

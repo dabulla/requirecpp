@@ -68,39 +68,23 @@ class TestThreadType {};
 void testcase1()
 {
     // root must always outlife all children Dependency reactors
-    requirecpp::DependencyReactor<TestCaseA> depReact;
-
-    bool reqCalled = false;
-    std::mutex mtx;
-    std::condition_variable cv;
-    TestThreadType t2;
-    std::thread t{[&cv, &mtx, &reqCalled]()
+    requirecpp::DependencyReactor<TestCaseA> rootReact;
+    std::thread t{[]()
     {
         try
         {
             requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
+            // sync, blocking version
+            auto user = depReact.require<UseSlowComponent>();
+            user->use(); // -> Add Require decorator "Lazy" to block on first usage
+            // tell requirecpp the thread has started and all require calls have been issued
+            depReact.createComponent<TestThreadType>();
+            // async version
+            depReact.require<UseSlowComponent>([](const auto &user)
             {
-                // async cases:
-                // 1) require is called before createComponent
-                // 2) require is called after createComponent
-                // 3) require is called after destruction of component with container<Context> already destroyed
-
-                // async version
-                depReact.require<UseSlowComponent>([](const auto &user)
-                {
-                    user->use();
-                });
-
-                // sync, blocking version
-                auto user = depReact.require<UseSlowComponent>();
-                std::unique_lock lk{mtx};
-                reqCalled = true;
-                lk.unlock();
-                cv.notify_one();
                 user->use();
-            }
-            std::unique_lock lk{mtx};
-            cv.wait(lk, [&reqCalled]{return !reqCalled;});
+            });
+
             std::cout << "cleanup TestcaseA" << std::endl;
         }
         catch (const std::exception &e)
@@ -110,14 +94,13 @@ void testcase1()
     }};
     try
     {
+        // require thread to be started
         CreatorObject c{};
-        std::unique_lock lk{mtx};
-        cv.wait(lk, [&reqCalled]{ return reqCalled;});
-        std::cout << "waited" << std::endl;
-        depReact.registerExistingComponent<TestThreadType>(t2);
-        depReact.require<Finished<TestThreadType>>();
-        reqCalled = false;
-        cv.notify_one();
+        auto thread = rootReact.require<TestThreadType>();
+        thread.unlock();
+        // require thread finish all require() calls
+        std::cout << "require finish" << std::endl;
+        rootReact.require<Finished<TestThreadType>>(); //< fails if not all require calls have been made,
         std::cout << "require Finished" << std::endl;
     }
     catch (const std::exception &e)
