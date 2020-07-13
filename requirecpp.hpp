@@ -258,6 +258,11 @@ public:
         DependencyReactor<Context, Self>::s_lockedComponents.erase(&m_lock);
         m_lock.unlock();
     }
+protected:
+    void _lock()
+    {
+        m_lock.lock();
+    }
 };
 
 template<typename Context, typename Self, typename T>
@@ -284,7 +289,10 @@ public:
     T* operator->() const { get(); return m_t.value().operator->();  }
     T& operator* () { get(); return m_t.value().operator*(); }
     T& operator* () const { get(); return m_t.value().operator*(); }
-    ComponentLazyReference() = default;
+    ComponentLazyReference()
+    {
+
+    }
     ~ComponentLazyReference() = default;
     ComponentLazyReference(const ComponentLazyReference& other) = delete; // no copy
     ComponentLazyReference(ComponentLazyReference&& other) noexcept = delete; // no move
@@ -464,8 +472,8 @@ public:
     {
         static bool exists()
         {
-            std::shared_lock lk{DependencyReactor<Context, Self>::s_lockedComponentsMutex};
-            const bool fin = DependencyReactor<Context, Self>::s_lockedComponents.empty();
+            std::shared_lock lk{DependencyReactor<Context, Dep>::s_lockedComponentsMutex};
+            const bool fin = DependencyReactor<Context, Dep>::s_lockedComponents.empty();
             lk.unlock();
             return Exists<Dep>::exists() && fin && Exists<Tail...>::exists();
         }
@@ -495,6 +503,62 @@ public:
         return Exists<Args...>::exists();
     }
 
+    // Acuire shared lock in ctor, unlocked.
+    template <typename T>
+    struct Requirement
+    {
+        // lock mutex, happens in construction of ComponentReference or lazy access
+        // mutex will be unlocked in conditionvariable.wait. Blocking
+//        void markAwaiting();
+
+//        void markSatisfied();
+        std::shared_lock<std::shared_mutex> m_lock;
+        // Pending requests: component not finished
+        // all requests satisfied: component Dependencies satisfied/ Component Assembled
+        // all ComonentReferences dropped: Component finished
+        how hand lock from guard to comp ref? How count pending/satisfied?
+        struct AwaitGuard
+        {
+            AwaitGuard()
+            {
+                auto &awaited = ContextAssociated<Context>::template awaited<T>;
+                //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
+                if(++awaited<T> != 1) return;
+                s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceCondition<T>);
+            }
+            ~AwaitGuard()
+            {
+                auto &awaited = ContextAssociated<Context>::template awaited<T>;
+                if(--awaited<T> != 0) return;
+                s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceCondition<T>);
+                ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify clear
+            }
+        };
+
+        Requirement()
+            :m_lock{ContextAssociated<Context>::template componentReferenceMutex<T>, std::defer_lock}
+        {
+            std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
+            DependencyReactor<Context, Self>::s_lockedComponents.insert(&m_lock);
+        }
+        static bool satisfied()
+        {
+            std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+            return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T> || !s_exists;
+        }
+        bool wait()
+        {
+            m_lock.lock();
+            AwaitGuard guard{};
+            ContextAssociated<Context>::template componentReferenceCondition<T>.wait(m_lock, &Requirement::satisfied);
+            const bool componentAvailable = ContextAssociated<Context>::template unavailable<T>; // store result before notifying clear
+            const bool exists = s_exists;
+            if(componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
+            if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
+            return componentAvailable && exists;
+        }
+
+    };
 
     template <typename T>
     struct Get
@@ -509,6 +573,7 @@ public:
         // check existance in wait condition
         static ComponentReference<Context, Self, T> get()
         {
+            split this monster up, list of locks and waitconditions combined? Lock without get
             std::unique_lock lk{s_mutex}; // guard s_pendingRequires (could be tighter)
             static_assert(!std::is_same<Self, T>(), "Don't require Self");
             std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
@@ -704,6 +769,7 @@ private:
     static std::unique_ptr<T> s_componentsOwned;
 
     std::vector<std::function<void()>> m_clear;
+    // needed for destruction. Unsatisfied requests are discarded and throw to their blocking require() call.
     static std::unordered_set<std::condition_variable_any*> s_pendingRequires;
     static std::vector<CallbackEx> s_executeWith;
     static std::vector<CallbackEx> s_executeWhenFinished;
