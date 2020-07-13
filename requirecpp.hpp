@@ -18,6 +18,23 @@ namespace
 {
 // todo: simlify by replace some mutexes by synchronized_value, semaphore
 
+// Rules for DependencyReactor: In the destructor, own pending require calls will throw.
+// Destructor will wait for ComponentReferences to unlock
+
+template<typename T>
+struct ComponentHolder
+{
+    T* ptr;
+    bool unavailable { false };
+    std::shared_mutex mutex;
+    // count calls to require, that are not yet satisfied. For destruction of the component, this must be zero.
+    unsigned int awaited { 0 };
+    // wait for component creation using this cv in require calls
+    static std::condition_variable_any cv;
+    // used to wait for finishing or aborting component usage, when Self destructs
+    static std::condition_variable_any cvBack;
+};
+
 template<typename Context>
 struct ContextAssociated
 {
@@ -25,22 +42,25 @@ struct ContextAssociated
      * Container for Components. Components are owned by this container and only exist once here.
      * std::unique_ptr allows usage of incomplete types.
      */
-    template<typename T>
-    static T* components;
+//    template<typename T>
+//    static T* components;
 
     template<typename T>
-    static std::shared_mutex componentReferenceMutex;
-    template<typename T>
-    static std::condition_variable_any componentReferenceCondition;
-    template<typename T>
-    static std::condition_variable_any componentReferenceConditionBack;
+    static ComponentHolder<T> components;
 
-    // flag to tell condition variable to stop waiting. Used when the required component is being decomposed
-    template<typename T>
-    static bool unavailable;
-    // number of blocking require calls for this component
-    template<typename T>
-    static unsigned int awaited;
+//    template<typename T>
+//    static std::shared_mutex componentReferenceMutex;
+//    template<typename T>
+//    static std::condition_variable_any componentReferenceCondition;
+//    template<typename T>
+//    static std::condition_variable_any componentReferenceConditionBack;
+
+//    // flag to tell condition variable to stop waiting. Used when the required component is being decomposed
+//    template<typename T>
+//    static bool unavailable;
+//    // number of blocking require calls for this component
+//    template<typename T>
+//    static unsigned int awaited;
     // this should only prevent threading problems but allow registerComponent to recurse
     // (in ctor of Component another Component can be registered)
     static std::recursive_mutex componentsMutex;
@@ -64,26 +84,32 @@ struct ContextAssociated
 //    static std::vector<void()> s_notifyKill;
 };
 
-template<typename Context>
-template<typename T>
-T* ContextAssociated<Context>::components;
-template<typename Context>
-template<typename T>
-std::shared_mutex ContextAssociated<Context>::componentReferenceMutex;
-template<typename Context>
-template<typename T>
-std::condition_variable_any ContextAssociated<Context>::componentReferenceCondition;
-template<typename Context>
-template<typename T>
-std::condition_variable_any ContextAssociated<Context>::componentReferenceConditionBack;
+template<typename Context, typename T>
+using Component = typename ContextAssociated<Context>::template components<T>;
 
 template<typename Context>
 template<typename T>
-bool ContextAssociated<Context>::unavailable {false};
+ComponentHolder<T> ContextAssociated<Context>::components;
+//template<typename Context>
+//template<typename T>
+//T* ContextAssociated<Context>::components;
+//template<typename Context>
+//template<typename T>
+//std::shared_mutex ContextAssociated<Context>::componentReferenceMutex;
+//template<typename Context>
+//template<typename T>
+//std::condition_variable_any ContextAssociated<Context>::componentReferenceCondition;
+//template<typename Context>
+//template<typename T>
+//std::condition_variable_any ContextAssociated<Context>::componentReferenceConditionBack;
 
-template<typename Context>
-template<typename T>
-unsigned int ContextAssociated<Context>::awaited {0};
+//template<typename Context>
+//template<typename T>
+//bool ContextAssociated<Context>::unavailable {false};
+
+//template<typename Context>
+//template<typename T>
+//unsigned int ContextAssociated<Context>::awaited {0};
 
 template<typename Context>
 std::recursive_mutex ContextAssociated<Context>::componentsMutex;
@@ -173,9 +199,17 @@ public:
 //    using type = T;
 //    //operator T() const { return *this; }
 //};
+template<typename T>
+class Existing //: public T
+{
+public:
+    using type = T;
+    //operator T() const { return *this; }
+};
 
 /// Decoration for require ///
 
+// all calls to require have finished and no component is used
 template<typename T>
 class Finished //: public T
 {
@@ -184,6 +218,16 @@ public:
     //operator T() const { return *this; }
 };
 
+// all calls to require have returned, components may still be used
+template<typename T>
+class Assembled //: public T
+{
+public:
+    using type = T;
+    //operator T() const { return *this; }
+};
+
+// do not block and immediatly return a component, but block on first usage of the component
 template<typename T>
 class Lazy //: public T
 {
@@ -192,6 +236,7 @@ public:
     //operator T() const { return *this; }
 };
 
+// return a reference to a component or throw. This is basic ServiceLocator style
 template<typename T>
 class Unlocked //: public T
 {
@@ -200,6 +245,19 @@ public:
     //operator T() const { return *this; }
 };
 
+// every call will lock the component by overloading the -> operator.
+// If the component was destroyed, the call will throw. This should not be used,
+// calls to the component will be slow and it must be expected, that every call could throw
+// This is discouraged for the same reasons as lock-free programming
+template<typename T>
+class LockFree //: public T
+{
+public:
+    using type = T;
+    //operator T() const { return *this; }
+};
+
+// immediately return with a component or nothing
 // Not yet implemented
 template<typename T>
 class OptionalPeek //: public T
@@ -208,6 +266,8 @@ public:
     using type = T;
     //operator T() const { return *this; }
 };
+
+// Try getting a component and wait a maximum duration
 // Not yet implemented
 template<typename T, typename Duration, Duration duration_>
 class Timed //: public T
@@ -304,6 +364,84 @@ public:
     }
 };
 
+template <typename Context, typename Self, typename T>
+struct Requirement
+{
+    // lock mutex, happens in construction of ComponentReference or lazy access
+    // mutex will be unlocked in conditionvariable.wait. Blocking
+//        void markAwaiting();
+
+//        void markSatisfied();
+    std::shared_lock<std::shared_mutex> m_lock;
+    // Pending requests: component not finished
+    // all requests satisfied: component Dependencies satisfied/ Component Assembled
+    // all ComonentReferences dropped: Component finished
+    //how hand lock from guard to comp ref? How count pending/satisfied?
+    // Guard Request while its pending (if non exist, Self is assembled)
+    //template <typename Context, typename Self, typename T>
+    struct RequestGuard
+    {
+        RequestGuard()
+        {
+            //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
+            // maintain a global register of component requests. If a context tears down with the component, all requests are aborted. TODO: not needed, call <T>.unavail = true and <T>.notify()
+            auto &awaitedContext = Component<Context, T>::awaited;
+            ++awaitedContext;
+            // maintain a register of component requests per Self to know if Self is assembled.
+            if(++DependencyReactor<Context, Self>::template s_awaited<T> != 1) return;
+            DependencyReactor<Context, Self>::template s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceCondition<T>); // TODO: Move out of DependencyReactor class?
+        }
+        ~RequestGuard()
+        {
+            auto &awaitedContext = Component<Context, T>::awaited;
+            --awaitedContext;
+            if(--DependencyReactor<Context, Self>::template s_awaited<T> == 1)
+            {
+                DependencyReactor<Context, Self>::template s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceCondition<T>);
+                Component<Context, T>::cvBack.notify_all(); // notify clear
+            }
+        }
+    };
+    // Guard Component while it is used or requested and not yet available (if non exist, Self is finished)
+    //template <typename Context, typename Self, typename T>
+    struct UsageGuard
+    {
+        UsageGuard()
+        {
+            std::scoped_lock lk {DependencyReactor<Context, Self>::template s_components<T>::mutex};
+            ++DependencyReactor<Context, Self>::template s_components<T>::refCount;
+        }
+        ~UsageGuard()
+        {
+            std::scoped_lock lk {DependencyReactor<Context, Self>::template s_components<T>::mutex};
+            --DependencyReactor<Context, Self>::template s_components<T>::refCount;
+        }
+    };
+
+
+
+    Requirement()
+        :m_lock{Component<Context, T>::mutex, std::defer_lock}
+    {
+    }
+    static bool satisfied()
+    {
+        std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+        return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T> || !s_exists;
+    }
+    void wait()
+    {
+        m_lock.lock();
+        RequestGuard guard{};
+        ContextAssociated<Context>::template componentReferenceCondition<T>.wait(m_lock, &Requirement::satisfied);
+        const bool componentAvailable = ContextAssociated<Context>::template unavailable<T>; // store result before notifying clear
+        const bool exists = s_exists;
+        if(!componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
+        if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
+    }
+};
+
+
 // use this to disable debugging information
 //template <typename Context, typename ...Deps>
 //using CallbackImpl = std::function<bool()>
@@ -349,6 +487,8 @@ public:
         std::scoped_lock lkMiss{ContextAssociated<Context>::whatsMissingMutex};
         ContextAssociated<Context>::whatsMissing.emplace_back(std::bind(&DependencyReactor<Context, Self>::whatsMissingLocal, this));
     }
+    // 1) unset exists flag not signal "abort" to all require calls
+    // 2) go through all own pending blocking require calls and let them throw
     ~DependencyReactor()
     {
         std::unique_lock lk{s_mutex};
@@ -400,66 +540,103 @@ public:
         }
     }
 
-    /**
-     *  register compontent of type T. Args are forwarded to construct T
-     */
-    template<typename T, typename ...Args>
-    void createComponent(const Args&& ...args)
+    template<typename T>
+    static void clearComponent()
     {
+        auto& component = ContextAssociated<Context>::template components<T>;
+        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+        // wait for all
+        ContextAssociated<Context>::template unavailable<T> = true;
+        std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+        ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
+        ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
+        {
+            return 0 == ContextAssociated<Context>::template awaited<T>;
+        });
+        std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+        component = nullptr; // breakpoint here and MinGW causes race condition
+        if constexpr(!is_specialization_of<Existing, T>())
+        {
+            std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
+            ownedComp.reset();
+        }
+        ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
+    }
+
+    template<typename DecoratedT, typename ...Args>
+    void registerComponent(const Args&& ...args)
+    {
+        using T = typename std::conditional<is_specialization_of<Existing, DecoratedT>::value, typename DecoratedT::type, DecoratedT>::type;
         std::unique_lock lk{s_mutex}; // guard s_lockdComponents
         //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
         std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
         checkRegisterPreconditions<T>();
         std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
+        m_clear.emplace_back(&DependencyReactor<Context, Self>::clearComponent<DecoratedT>);
         auto& component = ContextAssociated<Context>::template components<T>;
-        m_clear.emplace_back([&ownedComp, &component]() // < todo: make this use static vars, find way to fix race condition, find better synchronozation that with condition_variable ping/pong
+        if constexpr(is_specialization_of<Existing, T>())
         {
-            std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            ContextAssociated<Context>::template unavailable<T> = true;
-            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
-            ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
-            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
-            {
-                return 0 == ContextAssociated<Context>::template awaited<T>;
-            });
-            std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
-            component = nullptr; // breakpoint here and MinGW causes race condition
-            ownedComp.reset();
-            ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
-        });
-        ownedComp = std::make_unique<T>(args...);
-        ContextAssociated<Context>::template components<T> = ownedComp.get();
+            // use pointer to existing component
+            std::tuple<Args...> a( args... );
+            component = std::get<T>(&a);
+        }
+        else
+        {
+            // create a unique pointer and manage its lifecycle
+            std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
+            ownedComp = std::make_unique<T>(args...);
+            component = ownedComp.get();
+        }
         lkComp.unlock();
         componentAdded<T>();
     }
-    template<typename T>
-    void registerExistingComponent(T& comp)
-    {
-        //std::unique_lock lk{s_mutex};
-        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
-        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
-        checkRegisterPreconditions<T>();
-        auto& component = ContextAssociated<Context>::template components<T>;
-        m_clear.emplace_back([&component]()
-        {
-            // s_exists is now false, condition variable can terminate
-            std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
-            ContextAssociated<Context>::template unavailable<T> = true;
-            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
-            ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
-            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
-            {
-                return 0 == ContextAssociated<Context>::template awaited<T>;
-            });
-            std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
-            component = nullptr;
-            // let blocking calls to require wait for reregistering this component
-            ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
-        });
-        component = &comp;
-        lkComp.unlock();
-        componentAdded<T>();
-    }
+
+    /**
+     *  register compontent of type T. Args are forwarded to construct T
+     */
+//    template<typename T, typename ...Args>
+//    void createComponent(const Args&& ...args)
+//    {
+//        std::unique_lock lk{s_mutex}; // guard s_lockdComponents
+//        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
+//        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+//        checkRegisterPreconditions<T>();
+//        std::unique_ptr<T> &ownedComp = DependencyReactor<Context, Self>::s_componentsOwned<T>;
+//        auto& component = ContextAssociated<Context>::template components<T>;
+//        m_clear.emplace_back(&DependencyReactor<Context, Self>::clearComponent<T>);
+//        ownedComp = std::make_unique<T>(args...);
+//        ContextAssociated<Context>::template components<T> = ownedComp.get();
+//        lkComp.unlock();
+//        componentAdded<T>();
+//    }
+//    template<typename T>
+//    void registerExistingComponent(T& comp)
+//    {
+//        //std::unique_lock lk{s_mutex};
+//        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
+//        std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+//        checkRegisterPreconditions<T>();
+//        auto& component = ContextAssociated<Context>::template components<T>;
+//        m_clear.emplace_back([&component]()
+//        {
+//            // s_exists is now false, condition variable can terminate
+//            std::unique_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
+//            ContextAssociated<Context>::template unavailable<T> = true;
+//            std::cout << "before Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+//            ContextAssociated<Context>::template componentReferenceCondition<T>.notify_all();
+//            ContextAssociated<Context>::template componentReferenceConditionBack<T>.wait(lkComp, []()
+//            {
+//                return 0 == ContextAssociated<Context>::template awaited<T>;
+//            });
+//            std::cout << "after pingback Notify " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
+//            component = nullptr;
+//            // let blocking calls to require wait for reregistering this component
+//            ContextAssociated<Context>::template unavailable<T> = false; // reregisterable
+//        });
+//        component = &comp;
+//        lkComp.unlock();
+//        componentAdded<T>();
+//    }
 
 
     template <typename ...Tail>
@@ -504,61 +681,6 @@ public:
     }
 
     // Acuire shared lock in ctor, unlocked.
-    template <typename T>
-    struct Requirement
-    {
-        // lock mutex, happens in construction of ComponentReference or lazy access
-        // mutex will be unlocked in conditionvariable.wait. Blocking
-//        void markAwaiting();
-
-//        void markSatisfied();
-        std::shared_lock<std::shared_mutex> m_lock;
-        // Pending requests: component not finished
-        // all requests satisfied: component Dependencies satisfied/ Component Assembled
-        // all ComonentReferences dropped: Component finished
-        how hand lock from guard to comp ref? How count pending/satisfied?
-        struct AwaitGuard
-        {
-            AwaitGuard()
-            {
-                auto &awaited = ContextAssociated<Context>::template awaited<T>;
-                //std::cout << "Shared lock " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << std::endl;
-                if(++awaited<T> != 1) return;
-                s_pendingRequires.emplace(&ContextAssociated<Context>::template componentReferenceCondition<T>);
-            }
-            ~AwaitGuard()
-            {
-                auto &awaited = ContextAssociated<Context>::template awaited<T>;
-                if(--awaited<T> != 0) return;
-                s_pendingRequires.erase(&ContextAssociated<Context>::template componentReferenceCondition<T>);
-                ContextAssociated<Context>::template componentReferenceConditionBack<T>.notify_all(); // notify clear
-            }
-        };
-
-        Requirement()
-            :m_lock{ContextAssociated<Context>::template componentReferenceMutex<T>, std::defer_lock}
-        {
-            std::scoped_lock lk {DependencyReactor<Context, Self>::s_lockedComponentsMutex};
-            DependencyReactor<Context, Self>::s_lockedComponents.insert(&m_lock);
-        }
-        static bool satisfied()
-        {
-            std::cout << "in Wait " << std::string{typeid(T).name()} << " in " << std::string{typeid(Context).name()} << " exists: " << Exists<T>::exists() << " unav: " <<  ContextAssociated<Context>::template unavailable<T> << " awaited " << ContextAssociated<Context>::template awaited<T> << std::endl;
-            return Exists<T>::exists() || ContextAssociated<Context>::template unavailable<T> || !s_exists;
-        }
-        bool wait()
-        {
-            m_lock.lock();
-            AwaitGuard guard{};
-            ContextAssociated<Context>::template componentReferenceCondition<T>.wait(m_lock, &Requirement::satisfied);
-            const bool componentAvailable = ContextAssociated<Context>::template unavailable<T>; // store result before notifying clear
-            const bool exists = s_exists;
-            if(componentAvailable) throw std::runtime_error{"Component was never registered (component shutdown)"};
-            if(!exists) throw std::runtime_error{"Component was never registered (self shutdown)"};
-            return componentAvailable && exists;
-        }
-
-    };
 
     template <typename T>
     struct Get
@@ -573,7 +695,7 @@ public:
         // check existance in wait condition
         static ComponentReference<Context, Self, T> get()
         {
-            split this monster up, list of locks and waitconditions combined? Lock without get
+            //split this monster up, list of locks and waitconditions combined? Lock without get
             std::unique_lock lk{s_mutex}; // guard s_pendingRequires (could be tighter)
             static_assert(!std::is_same<Self, T>(), "Don't require Self");
             std::shared_lock lkComp{ContextAssociated<Context>::template componentReferenceMutex<T>};
@@ -771,6 +893,15 @@ private:
     std::vector<std::function<void()>> m_clear;
     // needed for destruction. Unsatisfied requests are discarded and throw to their blocking require() call.
     static std::unordered_set<std::condition_variable_any*> s_pendingRequires;
+
+    struct ComponentReactorHolder
+    {
+        unsigned int awaited{0};
+        unsigned int refCount{0};
+        std::shared_mutex mMutex;
+    };
+    template<typename T>
+    static ComponentReactorHolder s_components;
     static std::vector<CallbackEx> s_executeWith;
     static std::vector<CallbackEx> s_executeWhenFinished;
 //    std::vector<std::function<bool()>> m_executeWith;
@@ -780,8 +911,8 @@ private:
 //    {
 
 //    }
-    static std::shared_mutex s_lockedComponentsMutex;
-    static std::unordered_set<std::shared_lock<std::shared_mutex>*> s_lockedComponents;
+//    static std::shared_mutex s_lockedComponentsMutex;
+//    static std::unordered_set<std::shared_lock<std::shared_mutex>*> s_lockedComponents;
 
     // There must only be one DependencyReactor for each combination of Context and Self
     // using static members DependencyReactor can manage itself in the application without
@@ -797,10 +928,10 @@ template <typename Context, typename Self>
 template<typename T>
 std::unique_ptr<T> DependencyReactor<Context, Self>::s_componentsOwned;
 
-template <typename Context, typename Self>
-std::shared_mutex DependencyReactor<Context, Self>::s_lockedComponentsMutex;
-template <typename Context, typename Self>
-std::unordered_set<std::shared_lock<std::shared_mutex>*> DependencyReactor<Context, Self>::s_lockedComponents;
+//template <typename Context, typename Self>
+//std::shared_mutex DependencyReactor<Context, Self>::s_lockedComponentsMutex;
+//template <typename Context, typename Self>
+//std::unordered_set<std::shared_lock<std::shared_mutex>*> DependencyReactor<Context, Self>::s_lockedComponents;
 
 template <typename Context, typename Self>
 bool DependencyReactor<Context, Self>::s_exists = false;
@@ -810,6 +941,21 @@ std::mutex DependencyReactor<Context, Self>::s_mutex{};
 
 template <typename Context, typename Self>
 std::unordered_set<std::condition_variable_any*> DependencyReactor<Context, Self>::s_pendingRequires{};
+
+template <typename Context, typename Self>
+template<typename T>
+typename DependencyReactor<Context, Self>::ComponentReactorHolder DependencyReactor<Context, Self>::s_components;
+//template <typename Context, typename Self>
+//template<typename T>
+//unsigned int DependencyReactor<Context, Self>::s_awaited{0};
+
+//template <typename Context, typename Self>
+//template<typename T>
+//unsigned int DependencyReactor<Context, Self>::s_refCount{0};
+
+//template <typename Context, typename Self>
+//template<typename T>
+//std::shared_mutex DependencyReactor<Context, Self>::s_refCountMutex{0};
 
 template <typename Context, typename Self>
 std::vector<CallbackEx> DependencyReactor<Context, Self>::s_executeWith{};
