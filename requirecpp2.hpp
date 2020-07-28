@@ -114,7 +114,6 @@ struct is_specialization_of : std::false_type {};
 template < template <typename...> class Template, typename... Args >
 struct is_specialization_of< Template, Template<Args...> > : std::true_type {};
 
-
 /// Decorations for create/register ///
 
 /**
@@ -137,17 +136,18 @@ class Decoration
 {
     using BaseType = T;
 };
+
 template<typename T>
 class Decoration<Decoration<T>>
 {
     using BaseType = typename T::BaseType;
 };
 
-template <typename T>
-struct RemoveDecoration
-{
-    using type = typename Decoration<T>::BaseType;
-};
+//template <typename T>
+//struct RemoveDecoration
+//{
+//    using type = typename Decoration<T>::BaseType;
+//};
 
 template<typename T>
 class Existing : public Decoration<T>
@@ -164,6 +164,14 @@ class ComponentStateDecoration : public Decoration<T>
     //static_assert(std::is_base_of<ComponentStateDecoration, T>, "Do not Decorate with multiple Component States");
 };
 
+// all calls to require have returned, components may still be used
+template<typename T>
+class Assembled : public ComponentStateDecoration<T>
+{
+public:
+    using NoRegisterDecoration = std::true_type;
+};
+
 // all calls to require have finished and no component is used
 template<typename T>
 class Finished : public ComponentStateDecoration<T>
@@ -172,13 +180,6 @@ public:
     using NoRegisterDecoration = std::true_type;
 };
 
-// all calls to require have returned, components may still be used
-template<typename T>
-class Assembled : public ComponentStateDecoration<T>
-{
-public:
-    using NoRegisterDecoration = std::true_type;
-};
 
 template<typename T>
 class WaitModifyDecoration : public Decoration<T>
@@ -242,6 +243,172 @@ class LockFree : public LockModifyDecoration<T>
 public:
     using NoRegisterDecoration = std::true_type;
 };
+
+
+
+
+
+
+template <requirecpp::Context &context, typename Dep>
+struct SatisfyPolicyExisting
+{
+    static bool satisfied()
+    {
+        return requirecpp::Context::template s_components<Dep>.exists();
+    }
+    std::condition_variable_any &m_conditionVariable = requirecpp::Context::template s_components<Dep>.m_cvExist;
+    std::condition_variable_any &m_conditionVariableNotify = requirecpp::Context::template s_components<Dep>.m_cvAssembled;
+};
+
+template <requirecpp::Context &context, typename Dep>
+struct SatisfyPolicyAssembled
+{
+    static bool satisfied()
+    {
+        return requirecpp::Context::template s_components<Dep>.assembled();
+    }
+    std::condition_variable_any &m_conditionVariable = requirecpp::Context::template s_components<Dep>.m_cvAssembled;
+    std::condition_variable_any &m_conditionVariableNotify = requirecpp::Context::template s_components<Dep>.m_cvFinished;
+};
+
+template <requirecpp::Context &context, typename Dep>
+struct SatisfyPolicyFinished
+{
+    static bool satisfied()
+    {
+        return requirecpp::Context::template s_components<Dep>.finished();
+    }
+    std::condition_variable_any &m_conditionVariable = requirecpp::Context::template s_components<Dep>.m_cvFinished;
+    std::condition_variable_any &m_conditionVariableNotify = requirecpp::Context::template s_components<Dep>.m_cvDeletable;
+};
+
+//struct SatisfyPolicyDeletable
+//{
+//    template <requirecpp::Context &context, typename Dep>
+//    static bool satisfied()
+//    {
+//        return
+//    }
+//    template <requirecpp::Context &context, typename Dep>
+//    using ConditionVariable = requirecpp::Context::template s_components<Dep>.m_cvDeletable;
+//};
+
+template<requirecpp::Context &context, typename Dep, typename SatisfyPolicy>
+struct WaitPolicyBlocking
+{
+    static void wait()
+    {
+        SatisfyPolicy
+        return SatisfyPolicy::template satisfied<context, Dep>();
+    }
+};
+
+struct WaitPolicyTimedBlocking
+{
+    static std::string print()
+    {
+        return "Non";
+    }
+};
+
+struct WaitPolicyUnblock
+{
+    static std::string print()
+    {
+        return "Non";
+    }
+};
+
+struct LockPolicyLock
+{
+    static std::string print()
+    {
+        return "Non";
+    }
+};
+
+struct LockPolicyNoLock
+{
+    static std::string print()
+    {
+        return "Non";
+    }
+};
+
+template <typename ...Tail>
+struct Policies
+{
+};
+
+template <typename Dep, typename ...Tail>
+struct Policies<Assembled<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyAssembled;
+};
+template <typename Dep, typename ...Tail>
+struct Policies<Finished<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyFinished;
+};
+
+template <typename Dep, typename ...Tail>
+struct Policies<Existing<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyExisting;
+};
+
+template <typename Dep, typename ...Tail>
+struct Policies<Lazy<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyAssembled;
+};
+
+//template <typename Dep, typename ...Tail>
+//struct Policies<Timed<Dep>, Tail...> : public Policies<Dep, Tail...>
+//{
+//    using SatisfyPolicy = SatisfyPolicyFinished;
+//};
+
+template <typename Dep, typename ...Tail>
+struct Policies<OptionalPeek<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyExisting;
+};
+
+template <typename Dep, typename ...Tail>
+struct Policies<Unlocked<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyExisting;
+};
+
+template <typename Dep, typename ...Tail>
+struct Policies<LockFree<Dep>, Tail...> : public Policies<Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyExisting;
+};
+
+//template <typename Dep, typename ...Tail>
+//struct Policies<Dep, Tail...>
+//{
+//    using SatisfyPolicy = NoPolicy;
+//    using WaitPolicyGet = NoPolicy;
+//    using WaitPolicyLazy = NoPolicy; // is this the way to go?
+//    using LockPolicy = NoPolicy;
+//};
+
+template <>
+struct Policies<>
+{
+    using SatisfyPolicy = SatisfyPolicyExisting;
+    using WaitPolicyGet = WaitPolicyBlock;
+    //using WaitPolicyLazy = WaitPolicyBlock; // is this the way to go?
+    using LockPolicy = LockPolicyLock;
+};
+
+
+
+
+
 
 
 template <requirecpp::Context &context, typename ...Tail>
@@ -405,6 +572,7 @@ public:
         ~BlockingOnAcquireGuard()
         {
             --m_refCount;
+            m_lock.unlock();
             NotifyNext();
         }
         template<typename DecoratedT, typename Self, requirecpp::Context &context, requirecpp::DependencyReactor<context, Self> &reactor>
@@ -412,6 +580,13 @@ public:
         {
             WaitStrategy(m_lock, [&]{ return Satisfied<context, DecoratedT>::satisfied() || !reactor.s_exists;} );
         }
+        template<typename ComponentReferenceT, typename T>
+        ComponentReferenceT<T> use()
+        {
+
+        }
+
+
     private:
         std::unique_lock<std::shared_mutex> m_lock;
         unsigned int &m_refCount;
@@ -421,7 +596,7 @@ public:
     class BlockingOnAcquireGuard : private _BlockingOnAcquireGuard<WaitStrategyWait, WaitStrategyWait>
     {
     };
-    template <typename DecoratedT>
+    template <typename DecoratedT, std::enable_if<std::is_base_of<Assembled, DecoratedT>::type>>
     class BlockingOnAcquireGuard : private _BlockingOnAcquireGuard<>
     {
     };
@@ -700,6 +875,58 @@ public:
             checkDep();
         }
     }
+
+
+
+    // Locked/Unlocked can be specified: unlocked is a reference. locked is not
+    // callbacks can get a reference to a locked
+    // while Finished is omitted in the callback, Unlocked is not. It can be deduced using auto, however, the lambda must dereference (use -> or *)
+    template<typename T>
+    static auto require() -> decltype(Get<T>::get())
+    {
+        // Todo: dont use blocking require/seyncGet in construction of createComponent
+        //std::unique_lock lk2{ContextAssociated<Context>::componentsMutex};
+        return Get<T>::get();
+    }
+
+    template<typename ...Deps, typename Callback>
+    void require(const Callback &&callback)
+    {
+        //std::unique_lock lk{s_mutex};
+        _require<Deps...>(std::forward<const Callback &&>(callback));
+    }
+
+    template<typename ...Deps, typename Callback>
+    void _require(const Callback &&callback)
+    {
+//        const auto locks = std::make_tuple(std::unique_lock{ContextAssociated<Context>::template componentReferenceMutex<Deps>, std::try_to_lock}...);
+//        //std::unique_lock contextLock{ContextAssociated<Context>::componentReferenceMutex<Deps>, std::try_to_lock}...;
+//        const bool ownsAllLock = std::apply([](const auto&... lock){return (lock.owns_lock() && ...);}, locks);
+//        if( ownsAllLock && exists<Deps...>())
+//        {
+//            // avoid copying callback with this extra if
+//            // if lock could not be acquired, this might be executed in the ctor of a component.
+//            // in this case, execution is delayed until ctor finished.
+//            ContextAssociated<Context>::template components<Deps>, locks
+//            callback(require<Deps>()...);
+//        }
+//        else
+//        {
+            auto cb = [this, callback]()
+            {
+                if(!Satisfied<Deps...>()) return false;
+                callback(require<Deps>()...);
+                return true;
+            };
+            if(!cb())
+            {
+                // @todo finished, assembled
+                std::scoped_lock lkCheckDeps{ContextAssociated<Context>::checkDependenciesMutex};
+                s_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
+            }
+//        }
+    }
+
 
 private:
     std::unordered_set<std::condition_variable_any*> m_pendingRequests;
