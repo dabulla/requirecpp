@@ -249,7 +249,7 @@ public:
 
 
 
-template <requirecpp::Context &context, typename Dep>
+template <requirecpp::Context &context, typename Self, typename Dep>
 struct SatisfyPolicyExisting
 {
     static bool satisfied()
@@ -296,6 +296,10 @@ struct SatisfyPolicyFinished
 template<requirecpp::Context &context, typename Dep, typename SatisfyPolicy>
 struct WaitPolicyBlocking
 {
+    WaitPolicyBlocking()
+    {
+
+    }
     static void wait()
     {
         SatisfyPolicy
@@ -335,32 +339,30 @@ struct LockPolicyNoLock
     }
 };
 
-template <typename ...Tail>
-struct Policies
+template <requirecpp::Context &context, typename Self, typename ...Tail>
+struct Policies {};
+
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, Assembled<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
+    using SatisfyPolicy = SatisfyPolicyAssembled<context, Dep>;
+};
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, Finished<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
+{
+    using SatisfyPolicy = SatisfyPolicyFinished<context, Dep>;
 };
 
-template <typename Dep, typename ...Tail>
-struct Policies<Assembled<Dep>, Tail...> : public Policies<Dep, Tail...>
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, Existing<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
-    using SatisfyPolicy = SatisfyPolicyAssembled;
-};
-template <typename Dep, typename ...Tail>
-struct Policies<Finished<Dep>, Tail...> : public Policies<Dep, Tail...>
-{
-    using SatisfyPolicy = SatisfyPolicyFinished;
+    using SatisfyPolicy = SatisfyPolicyExisting<context, Dep>;
 };
 
-template <typename Dep, typename ...Tail>
-struct Policies<Existing<Dep>, Tail...> : public Policies<Dep, Tail...>
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, Lazy<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
-    using SatisfyPolicy = SatisfyPolicyExisting;
-};
-
-template <typename Dep, typename ...Tail>
-struct Policies<Lazy<Dep>, Tail...> : public Policies<Dep, Tail...>
-{
-    using SatisfyPolicy = SatisfyPolicyAssembled;
+    using SatisfyPolicy = SatisfyPolicyAssembled<context, Dep>;
 };
 
 //template <typename Dep, typename ...Tail>
@@ -369,22 +371,22 @@ struct Policies<Lazy<Dep>, Tail...> : public Policies<Dep, Tail...>
 //    using SatisfyPolicy = SatisfyPolicyFinished;
 //};
 
-template <typename Dep, typename ...Tail>
-struct Policies<OptionalPeek<Dep>, Tail...> : public Policies<Dep, Tail...>
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, OptionalPeek<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
-    using SatisfyPolicy = SatisfyPolicyExisting;
+    using SatisfyPolicy = SatisfyPolicyExisting<context, Dep>;
 };
 
-template <typename Dep, typename ...Tail>
-struct Policies<Unlocked<Dep>, Tail...> : public Policies<Dep, Tail...>
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, Unlocked<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
-    using SatisfyPolicy = SatisfyPolicyExisting;
+    using SatisfyPolicy = SatisfyPolicyExisting<context, Dep>;
 };
 
-template <typename Dep, typename ...Tail>
-struct Policies<LockFree<Dep>, Tail...> : public Policies<Dep, Tail...>
+template <requirecpp::Context &context, typename Self, typename Dep, typename ...Tail>
+struct Policies<context, Self, LockFree<Dep>, Tail...> : public Policies<context, Self, Dep, Tail...>
 {
-    using SatisfyPolicy = SatisfyPolicyExisting;
+    using SatisfyPolicy = SatisfyPolicyExisting<context, Dep>;
 };
 
 //template <typename Dep, typename ...Tail>
@@ -396,11 +398,11 @@ struct Policies<LockFree<Dep>, Tail...> : public Policies<Dep, Tail...>
 //    using LockPolicy = NoPolicy;
 //};
 
-template <>
-struct Policies<>
+template <requirecpp::Context &context, typename Self>
+struct Policies<context, Self>
 {
-    using SatisfyPolicy = SatisfyPolicyExisting;
-    using WaitPolicyGet = WaitPolicyBlock;
+    using SatisfyPolicy = SatisfyPolicyExisting<context, Self>;
+    using WaitPolicyGet = WaitPolicyBlock<context, Self>;
     //using WaitPolicyLazy = WaitPolicyBlock; // is this the way to go?
     using LockPolicy = LockPolicyLock;
 };
@@ -486,11 +488,74 @@ class ComponentHolder
     // if nobody is waiting for anything, component can be deleted
     bool deletable() { return finished() && 0 == m_referenceCountFinished; }
 
+    // Class not threadsafe, must be guarded by ComponentHolders lock
+    template <typename Callback>
+    class Condition
+    {
+        std::condition_variable_any m_cv;
+        unsigned int m_referenceCount { 0 };
+        Callback m_callback;
+        Condition &m_nextCondition;
+        friend class ConditionGuard;
+    public:
+        Condition(Callback&& callback)
+            :m_callback{std::forward<Callback>(callback)}
+        {}
+        bool satisfied()
+        {
+            return m_callback();
+        }
+        template<typename Lock>
+        void wait(Lock &lock)
+        {
+            m_cv.wait(lock, m_callback);
+        }
+        void notify()
+        {
+            m_cv.notify_all();
+        }
+        class ConditionGuard
+        {
+            friend class Condition;
+            Condition &m_condition;
+            ConditionGuard(Condition& condition)
+                :m_condition{condition}
+            {
+                ++m_condition.m_referenceCount;
+            }
+            ConditionGuard(const ConditionGuard&) = delete;
+            ConditionGuard(ConditionGuard&&) = delete;
+            ConditionGuard& operator=(const ConditionGuard&) = delete;
+            ConditionGuard& operator=(ConditionGuard&&) = delete;
+        public:
+            ~ConditionGuard()
+            {
+                --m_condition.m_referenceCount;
+                if(m_condition.m_nextCondition.satisfied())
+                {
+                    m_condition.m_nextCondition.notify();
+                }
+            }
+        };
+        [[nodiscard]] ConditionGuard conditionGuard() const
+        {
+            return ConditionGuard(this);
+        }
+    };
+    // notified when 0 == m_ptr changed
+    Condition m_exist {m_assembled};
+    // notified when 0 == m_referenceCountExist changed
+    Condition m_assembled;
+    // notified when 0 == m_referenceCountAssembled changed
+    Condition m_finished;
+    // notified when 0 == m_referenceCountFinished changed
+    Condition m_deletable;
+
     void waitForDeletable()
     {
         std::unique_lock lk{mutex};
         // ensure, everyone returned or aborted, this request should not use the abort-flag
-        m_cvDeletable.wait(lk, [&]{ return deletable();});
+        m_cvDeletable.wait(lk, [&] { return deletable(); });
     }
 public:
     const T*& get() { return m_ptr; }
