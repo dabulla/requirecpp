@@ -23,7 +23,7 @@ public:
 
 class UseSlowComponent
 {
-    requirecpp::DependencyReactor<TestCaseA, UseSlowComponent> m_dr;
+    requirecpp::DependencyReactor<UseSlowComponent> m_dr;
 public:
     UseSlowComponent()
     {
@@ -38,22 +38,31 @@ public:
         {
             comp->slowOperation();
         });
+        m_dr.require("KeySlowComponent2Name", [](const SlowComponent &comp)
+        {
+            comp.slowOperation();
+        });
+        m_dr.require<Assembled>("KeySlowComponent2Name", [](const SlowComponent &comp)
+        {
+            comp.slowOperation();
+        });
     }
 };
 
 class RegisterSlowComponent
 {
-    requirecpp::DependencyReactor<TestCaseA, RegisterSlowComponent> m_dr;
+    requirecpp::DependencyReactor<RegisterSlowComponent> m_dr;
 public:
     RegisterSlowComponent()
     {
         m_dr.createComponent<SlowComponent>();
+        m_dr.createComponent<SlowComponent>("KeySlowComponent2Name");
     }
 };
 
 class CreatorObject
 {
-    requirecpp::DependencyReactor<TestCaseA, CreatorObject> m_dr;
+    requirecpp::DependencyReactor<CreatorObject> m_dr;
 public:
     CreatorObject()
     {
@@ -73,17 +82,17 @@ void testcase1()
     {
         try
         {
-            requirecpp::DependencyReactor<TestCaseA, TestThreadType> depReact;
+            requirecpp::DependencyReactor<TestThreadType> depReact;
             // sync, blocking version
-            auto user = depReact.require<Lazy<UseSlowComponent>>();
-            user->use(); // -> Add Require decorator "Lazy" to block on first usage
+            //auto user = depReact.require<Lazy<UseSlowComponent>>();
+            //user->use(); // -> Add Require decorator "Lazy" to block on first usage
             // tell requirecpp the thread has started and all require calls have been issued
-            depReact.createComponent<TestThreadType>();
+            //depReact.createComponent<TestThreadType>();
             // async version
-//            depReact.require<UseSlowComponent>([](const auto &user)
-//            {
-//                user->use();
-//            });
+            depReact.require<UseSlowComponent>([](const auto &user)
+            {
+                user->use();
+            });
 
             std::cout << "cleanup TestcaseA" << std::endl;
         }

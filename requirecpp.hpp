@@ -16,10 +16,99 @@
 
 namespace
 {
-// todo: simlify by replace some mutexes by synchronized_value, semaphore
-
 // Rules for DependencyReactor: In the destructor, own pending require calls will throw.
 // Destructor will wait for ComponentReferences to unlock
+
+
+// if Required are used as members, they must be after the Context member. Otherwise, Context will throw
+template <typename T>
+class Require
+{
+    std::unique_lock<std::mutex> lock;
+    T* t{nullptr};
+    T& operator->();
+};
+
+// helps tracking or removing lazy requirements
+class Connection
+{
+    bool isSatisfied();
+    bool isFinished();
+    bool removeIfPending();
+    bool waitForSatisfied();
+    bool waitForFinished();
+    bool valid(); // valid only if not removed, context not destructed, not finished
+};
+
+// userContext.require<Satisfies<Printer, "working">((const Printer &printer){printer.print()});
+// printerContext.require<Paper, Ink, Satisfies<Network, "connected">>((const auto &...args){printerContext.satisfy("working")});
+// or extra:
+// printerContext.satisfy<Paper, Ink, Satisfies<Network, "connected">>("working"); //< advantage, remove satisfy if requirement is gone
+// if Paper is removed, it has to wait until print returns. Print must not be executed afterwards
+template<typename T, typename S, S s>
+class Satisfies
+{};
+
+// this is given in constructor.
+template <typename S = std::string>
+class Context
+{
+public
+    template<typename ...Deps, typename Callback>
+    Connection require(const Callback &&callback)
+    {
+        auto cb = [this, c = std::move(callback)]()
+        {
+            if(!exists<Deps...>()) return false;
+            c(require<Deps>()...);
+            return true;
+        };
+
+        std::scoped_lock lkCheckDeps{ContextAssociated<Context>::checkDependenciesMutex};
+        if(!cb())
+        {
+            s_executeWith.emplace_back(std::make_unique<DependencyCallback<Context, Deps...>>(cb));
+        }
+    }
+    template<typename T>
+    Require<T> require();
+    template<typename T, typename K>
+    Require<T> require(const K &&key);
+
+    //todo: alias/interface
+    template<typename T, typename ...P>
+    void create(const P&& ...p);
+
+    template<typename T, typename K, typename ...P>
+    void create(const K&& k, const P&& ...p);
+
+    template<typename ...T>
+    void set(T&& ...t);
+    template<typename K, typename ...T>
+    void set(const K&& key, T&& ...t);
+
+    // blocks until no longer required. Removed immediatly if pending requirements are not yet satisfied
+    template<typename ...T>
+    void remove();
+    template<typename K>
+    void remove(const K&& key);
+
+    // if all requirements until this point are satisfied, the associated object reaches "state". This is more abstract than exists/"assembled"/finished
+    // state depends on issued require calls (async) and
+    // update: this immediatly sets associated object into state. It can be used with require<>(callback) to go into states
+    template<typename K>
+    void satisfy(const K&& key)
+public:
+    // signal exists //< fired after initial requires have been called, associated object has been constructed.
+    // signal assembled //< all initial requirements have been satisfied. Calls to require after "exist" are taken into account (@todo check if this is cool)
+    // signal finished //< This is the same as !Exists. Fired after destruction by parent context
+};
+
+
+
+
+
+
 
 template<typename T>
 struct ComponentHolder
@@ -36,6 +125,8 @@ struct ComponentHolder
     // @todo container with all possible affected require calls like checkDependencies, to reduce number of checks in comparison with context-global list
 };
 
+// requirecpp associates all data to Contexts. The Context type is used as a unique identifier for
+// your application.
 template<typename Context>
 struct ContextAssociated
 {
@@ -231,61 +322,61 @@ public:
     //operator T() const { return *this; }
 };
 
-// do not block and immediatly return a component, but block on first usage of the component
-template<typename T>
-class Lazy //: public T
-{
-public:
-    using type = T;
-    using NoRegisterDecoration = std::true_type;
-    //operator T() const { return *this; }
-};
+//// do not block and immediatly return a component, but block on first usage of the component
+//template<typename T>
+//class Lazy //: public T
+//{
+//public:
+//    using type = T;
+//    using NoRegisterDecoration = std::true_type;
+//    //operator T() const { return *this; }
+//};
 
-// return a reference to a component or throw. This is basic ServiceLocator style
-template<typename T>
-class Unlocked //: public T
-{
-public:
-    using type = T;
-    using NoRegisterDecoration = std::true_type;
-    //operator T() const { return *this; }
-};
+//// return a reference to a component or throw. This is basic ServiceLocator style
+//template<typename T>
+//class Unlocked //: public T
+//{
+//public:
+//    using type = T;
+//    using NoRegisterDecoration = std::true_type;
+//    //operator T() const { return *this; }
+//};
 
-// every call will lock the component by overloading the -> operator.
-// If the component was destroyed, the call will throw. This should not be used,
-// calls to the component will be slow and it must be expected, that every call could throw
-// This is discouraged for the same reasons as lock-free programming
-template<typename T>
-class LockFree //: public T
-{
-public:
-    using type = T;
-    using NoRegisterDecoration = std::true_type;
-    //operator T() const { return *this; }
-};
+//// every call will lock the component by overloading the -> operator.
+//// If the component was destroyed, the call will throw. This should not be used,
+//// calls to the component will be slow and it must be expected, that every call could throw
+//// This is discouraged for the same reasons as lock-free programming
+//template<typename T>
+//class LockFree //: public T
+//{
+//public:
+//    using type = T;
+//    using NoRegisterDecoration = std::true_type;
+//    //operator T() const { return *this; }
+//};
 
-// immediately return with a component or nothing
-// Not yet implemented
-template<typename T>
-class OptionalPeek //: public T
-{
-public:
-    using type = T;
-    using NoRegisterDecoration = std::true_type;
-    //operator T() const { return *this; }
-};
+//// immediately return with a component or nothing
+//// Not yet implemented
+//template<typename T>
+//class OptionalPeek //: public T
+//{
+//public:
+//    using type = T;
+//    using NoRegisterDecoration = std::true_type;
+//    //operator T() const { return *this; }
+//};
 
-// Try getting a component and wait a maximum duration
-// Not yet implemented
-template<typename T, typename Duration, Duration duration_>
-class Timed //: public T
-{
-public:
-    using type = T;
-    using NoRegisterDecoration = std::true_type;
-    static constexpr Duration duration = duration_;
-    //operator T() const { return *this; }
-};
+//// Try getting a component and wait a maximum duration
+//// Not yet implemented
+//template<typename T, typename Duration, Duration duration_>
+//class Timed //: public T
+//{
+//public:
+//    using type = T;
+//    using NoRegisterDecoration = std::true_type;
+//    static constexpr Duration duration = duration_;
+//    //operator T() const { return *this; }
+//};
 
 template <typename ...Tail>
 struct Satisfied
@@ -314,15 +405,15 @@ struct Satisfied<Context, Finished<Dep>, Tail...>
         return Satisfied<Context, Dep>::satisfied() && fin && Satisfied<Context, Tail...>::satisfied();
     }
 };
-// exists never locks
-template <typename Context, typename Dep, typename ...Tail>
-struct Satisfied<Context, Unlocked<Dep>, Tail...>
-{
-    static bool satisfied()
-    {
-        return Satisfied<Dep, Tail...>::satisfied();
-    }
-};
+//// exists never locks
+//template <typename Context, typename Dep, typename ...Tail>
+//struct Satisfied<Context, Unlocked<Dep>, Tail...>
+//{
+//    static bool satisfied()
+//    {
+//        return Satisfied<Dep, Tail...>::satisfied();
+//    }
+//};
 template <typename Context, typename Dep, typename ...Tail>
 struct Satisfied<Context, Dep, Tail...>
 {
