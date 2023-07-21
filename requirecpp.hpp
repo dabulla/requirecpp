@@ -11,16 +11,12 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 #include "closure_traits.hpp"
 #include "decorators.hpp"
-
-// todo: simplify by replace some mutexes by synchronized_value, semaphore
-
-// Rules for DependencyReactor: In the destructor, own pending require calls
-// will throw. Destructor will wait for ComponentReferences to unlock
 
 namespace requirecpp {
 
@@ -38,42 +34,8 @@ class finally {
   F m_action;
 };
 
-// template <typename T>
-// class UsageGuard {
-//   T& m_t;
-//   std::shared_lock<std::shared_mutex> m_lock;
-
-// public:
-//  using type = T;
-//  operator T() { return m_t; }
-//  operator T() const { return m_t; }
-//  T* operator->() { return &m_t; }
-//  T* operator->() const { return &m_t; }
-//  T& operator*() { return m_t; }
-//  T& operator*() const { return m_t; }
-//  UsageGuard(T& t, std::shared_lock<std::shared_mutex>&& lock)
-//      : m_t{t}, m_lock{std::move(lock)} {}
-//  ~UsageGuard() {}
-//  UsageGuard(const UsageGuard& other) = delete;             // no copy
-//  UsageGuard& operator=(const UsageGuard& other) = delete;  // no copy assign
-//  UsageGuard(UsageGuard&& other) noexcept
-//      : m_t{other.m_t}, m_lock{std::move(other.m_lock)} {}
-//  UsageGuard& operator=(UsageGuard&& other) noexcept {
-//    if (this != &other) {
-//      m_t = std::move(other.m_t);
-//      m_lock = std::move(other.m_lock);
-//    }
-//    return *this;
-//  }
-//};
-
 class Context final {
  private:
-  //    template<template <typename ...Tail> typename tuple, typename ...Tail>
-  //    struct Satisfied
-  //    {
-  //        static bool satisfied(const Context* ctx) { return true; }
-  //    };
   template <typename... Tail>
   struct Satisfied {
     static bool satisfied(const Context* ctx) { return true; }
@@ -84,43 +46,6 @@ class Context final {
     static bool satisfied(const Context* ctx) {
       return ctx->exists<T>() && Satisfied<Tail...>::satisfied(ctx);
     }
-  };
-
-  //  template <typename T>
-  //  struct Get {
-  //    static std::shared_ptr<T> get(const Context* ctx) {
-  //      const auto& objects = Context::s_objects<typename std::decay_t<T>>;
-  //      auto iter = objects.find(ctx);
-  //      if (iter == end(objects)) {
-  //        throw std::logic_error{
-  //            "Tried to access object that is not yet available"};
-  //      }
-  //      return iter->get();
-  //    }
-  //  };
-  //    template <typename T, auto ...state>
-  //    struct Get<decorator::StateDecoration<T, state...>>
-  //    {
-  //        // just throw if component does not exist
-  //        static UsageGuard<T>& get()
-  //        {
-  //            T* &comp = ContextAssociated<Context>::template components<T>;
-  //            if(nullptr == comp) throw std::runtime_error{"Component
-  //            Unknown"}; return *comp;
-  //        }
-  //    };
-
-  template <typename T>
-  struct LookupDeducer {
-    using type = std::decay_t<T>;
-  };
-  template <typename T>
-  struct LookupDeducer<std::shared_ptr<T>> {
-    using type = std::decay_t<T>;
-  };
-  template <typename T>
-  struct LookupDeducer<T*> {
-    using type = std::decay_t<T>;
   };
 
   template <typename T>
@@ -146,8 +71,7 @@ class Context final {
   struct CallHelper {
     template <typename Callback>
     static void invoke(Context* ctx, Callback&& callback) {
-      callback(DepConverter<Deps>::convert(
-          ctx->require<typename LookupDeducer<Deps>::type>())...);
+      callback(DepConverter<Deps>::convert(ctx->require<Deps>())...);
     }
   };
   template <typename... Deps>
@@ -208,17 +132,9 @@ class Context final {
 
   template <typename T, typename... Args>
   void emplace(Args&&... args) {
-    using type = LookupDeducer<T>::type;
     std::scoped_lock lk{m_mutex};
-    auto& objects = Context::s_objects<typename std::decay_t<type>>;
-    auto iter = objects.find(this);
-    if (iter == end(objects)) {
-      bool success;
-      std::tie(iter, success) = objects.try_emplace(
-          this, std::make_shared<Context::TrackableObject<T>>(
-                    std::make_shared<T>(std::forward<Args>(args)...)));
-    }
-    iter->second->set(std::make_shared<T>(std::forward<Args>(args)...));
+    std::shared_ptr<TrackableObject<T>> copy = lookup_emplace<T>();
+    copy->set(std::make_shared<T>(std::forward<Args>(args)...));
     m_pending.erase(
         std::remove_if(begin(m_pending), end(m_pending), [&](auto& cb) {
           bool satisfied = cb.satisfied(this);
@@ -244,9 +160,24 @@ class Context final {
   //    void emplace(const Args&& ...args);
 
   template <typename T>
-  std::shared_ptr<T> require() {
+  static constexpr auto lookup_type() {
+    if constexpr (is_specialization_of<std::shared_ptr,
+                                       std::decay_t<T>>::value) {
+      return std::decay_t<typename T::element_type>();
+    } else if constexpr (std::is_pointer<std::decay_t<T>>()) {
+      return std::decay_t<std::remove_pointer_t<std::decay_t<T>>>();
+    } else {
+      return std::decay_t<T>();
+    }
+  }
+  template <typename T>
+  using LookupType = std::invoke_result_t<decltype(lookup_type<T>)>;
+
+  template <typename T>
+  std::shared_ptr<LookupType<T>> require() {
     std::unique_lock lk{m_mutex};
-    std::shared_ptr<TrackableObject<T>> copy = lookup_or_create<T>();
+    std::shared_ptr<TrackableObject<LookupType<T>>> copy =
+        lookup_or_create<T>();
     lk.unlock();
     return copy->get();
   }
@@ -316,26 +247,25 @@ class Context final {
   };
   std::recursive_mutex m_mutex;
 
-  template <typename T>
-  using LookupType = std::conditional<
-      is_specialization_of<std::shared_ptr, std::decay_t<T>>::type,
-      typename T::element_type,
-      std::decay_t<T>>;
   // lookup, decays type, handles shared_ptr
   template <typename T>
   constexpr auto& get_objects() {
     return Context::s_objects<LookupType<T>>;
   }
   template <typename T>
-  bool exists() {
+  constexpr auto& get_objects() const {
+    return Context::s_objects<LookupType<T>>;
+  }
+  template <typename T>
+  bool exists() const {
     const auto& objects = get_objects<T>();
     const auto& iter = objects.find(this);
     return iter != end(objects) && iter->second != nullptr &&
            iter->second->get() != nullptr;
   }
   template <typename T>
-  std::shared_ptr<TrackableObject<T>> lookup_or_create() {
-    const auto& objects = get_objects<T>();
+  std::shared_ptr<TrackableObject<LookupType<T>>> lookup_or_create() {
+    auto& objects = get_objects<T>();
     auto iter = objects.find(this);
     if (iter == end(objects)) {
       bool success;
@@ -343,6 +273,18 @@ class Context final {
           this, std::make_shared<Context::TrackableObject<LookupType<T>>>());
     }
     return iter->second;
+  }
+  template <typename T, typename... Args>
+  std::shared_ptr<TrackableObject<LookupType<T>>> lookup_emplace(Args... args) {
+    auto& objects = get_objects<T>();
+    auto iter = objects.find(this);
+    if (iter != end(objects)) {
+      throw std::invalid_argument{"Object type already registered"};
+    }
+    auto p = std::make_shared<TrackableObject<LookupType<T>>>(
+        std::make_shared<LookupType<T>>(std::forward<Args>(args)...));
+    auto [obj, suc] = objects.emplace(this, p);
+    return obj->second;
   }
   template <typename T>
   static std::unordered_map<const Context*, std::shared_ptr<TrackableObject<T>>>
