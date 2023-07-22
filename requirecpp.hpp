@@ -83,10 +83,11 @@ class Context final {
   template <typename Dep, typename... Deps>
   struct DebugInfo<Dep, Deps...> {
     static std::unordered_map<std::string, bool> list(const Context* ctx) {
-      auto set1 = DebugInfo<Dep>::list(ctx);
-      const auto set2 = DebugInfo<Deps...>::list(ctx);
-      set1.insert(set2.cbegin(), set2.cend());
-      return set1;
+      bool satisfied = Satisfied<Dep>::satisfied(ctx);
+      auto pair = std::make_pair(type_pretty<Dep>() + " (" + type_pretty<LookupType<Dep>>() + ")", satisfied);
+      auto set = DebugInfo<Deps...>::list(ctx);
+      set.emplace(pair);
+      return set;
     }
   };
 
@@ -139,7 +140,6 @@ class Context final {
         std::remove_if(begin(m_pending), end(m_pending), [&](auto& cb) {
           bool satisfied = cb.satisfied(this);
           if (satisfied) {
-            std::cout << "Calling dep" << m_pending.size() << std::endl;
             cb.call(this);
           }
           return satisfied;
@@ -186,6 +186,9 @@ class Context final {
   void require(Callback&& callback) {
     std::cout << "req callback " << m_pending.size() << std::endl;
     RequirementCallback cb{callback};
+    for (const auto &[name, satisfied]: cb.listDependecies(this)) {
+        std::cout << "{" << name << ": " << (satisfied?"    ":"not ") << "satisfied}" << std::endl;
+    }
     std::scoped_lock lk{m_mutex};
     if (cb.satisfied(this)) {
       std::cout << "req satisfied " << m_pending.size() << std::endl;
@@ -218,15 +221,12 @@ class Context final {
     // blocking
     std::shared_ptr<T> get() {
       std::unique_lock lk{m_mutex};
-      if (!m_shutdown && m_object) {
-        return m_object;
-      } else {
-        m_pending++;
-        finally final_action{[&] { m_pending--; }};
-        m_cv.wait(lk, [&] { return m_shutdown || m_object != nullptr; });
-        if (m_shutdown)
-          throw std::runtime_error{"Could not get object"};
-      }
+      m_pending++;
+      finally final_action{[&] { m_pending--; }};
+      m_cv.wait(lk, [&] { return m_shutdown || m_object != nullptr; });
+      if (m_shutdown)
+        throw std::runtime_error{"Could not get object"};
+      return m_object;
     }
 
     void fail() {
