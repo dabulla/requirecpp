@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <sstream>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -50,7 +51,7 @@ class Context final {
 
   template <typename T>
   struct DepConverter {
-    static T convert(std::shared_ptr<std::remove_reference_t<T>>&& from) {
+    static T convert(std::shared_ptr<std::remove_reference_t<T>>& from) {
       return *from;
     }
   };
@@ -84,7 +85,9 @@ class Context final {
   struct DebugInfo<Dep, Deps...> {
     static std::unordered_map<std::string, bool> list(const Context* ctx) {
       bool satisfied = Satisfied<Dep>::satisfied(ctx);
-      auto pair = std::make_pair(type_pretty<Dep>() + " (" + type_pretty<LookupType<Dep>>() + ")", satisfied);
+      auto pair = std::make_pair(
+          type_pretty<Dep>() + " -> " + type_pretty<LookupType<Dep>>(),
+          satisfied);
       auto set = DebugInfo<Deps...>::list(ctx);
       set.emplace(pair);
       return set;
@@ -94,26 +97,62 @@ class Context final {
   class RequirementCallback {
    public:
     template <typename Callback>
-    RequirementCallback(Callback&& callback) {
-      m_satisfied = [](const Context* ctx) -> bool {
-        return unpack_tuple_to<typename closure_traits<Callback>::arguments>::
-            template type<Satisfied>::satisfied(ctx);
+    RequirementCallback(Callback&& callback, const std::string& name)
+        : m_name{name} {
+      auto tmp = [name](const Context* ctx) {
+        auto list = closure_traits<Callback>::template unpack_arguments_to<
+            DebugInfo>::list(ctx);
+        for (const auto& [dep, satisfied] : list) {
+          std::cout << name << "{" << dep << ": "
+                    << (satisfied ? "    " : "not ") << "satisfied}"
+                    << std::endl;
+        }
       };
-      m_callback = [callback](Context* ctx) mutable -> void {
-        unpack_tuple_to<typename closure_traits<Callback>::arguments>::
-            template type<CallHelper>::invoke(ctx, callback);
+      m_satisfied = [tmp](const Context* ctx) -> bool {
+        // tmp(ctx);
+        return closure_traits<Callback>::template unpack_arguments_to<
+            Satisfied>::satisfied(ctx);
+      };
+      m_callback = [callback, tmp](Context* ctx) -> void {
+        // tmp(ctx);
+        closure_traits<Callback>::template unpack_arguments_to<
+            CallHelper>::invoke(ctx, callback);
       };
       m_debug =
           [](const Context* ctx) -> std::unordered_map<std::string, bool> {
-        return unpack_tuple_to<typename closure_traits<Callback>::arguments>::
-            template type<DebugInfo>::list(ctx);
+        return closure_traits<Callback>::template unpack_arguments_to<
+            DebugInfo>::list(ctx);
       };
     }
 
     bool satisfied(const Context* ctx) { return m_satisfied(ctx); }
     void call(Context* ctx) { return m_callback(ctx); }
-    std::unordered_map<std::string, bool> listDependecies(const Context* ctx) {
+    std::unordered_map<std::string, bool> list_dependecies(
+        const Context* ctx) const {
       return m_debug(ctx);
+    }
+    void print_dependencies(const Context* ctx) const {
+      for (const auto& [name, satisfied] : list_dependecies(ctx)) {
+        std::cout << "{" << name << ": " << (satisfied ? "    " : "not ")
+                  << "satisfied}" << std::endl;
+      }
+    }
+
+    const std::string& get_name() const { return m_name; }
+
+    std::string declaration(const Context* ctx) const {
+      std::stringstream ss;
+      ss << get_name() << "(";
+      bool first = true;
+      for (const auto& [dep, satisfied] : list_dependecies(ctx)) {
+        if (first)
+          first = false;
+        else
+          ss << ", ";
+        ss << dep << (satisfied ? " yes" : " no");
+      }
+      ss << ")";
+      return ss.str();
     }
 
    private:
@@ -121,6 +160,7 @@ class Context final {
     std::function<void(Context*)> m_callback;
     std::function<std::unordered_map<std::string, bool>(const Context*)>
         m_debug;
+    std::string m_name;
   };
 
  public:
@@ -136,14 +176,17 @@ class Context final {
     std::scoped_lock lk{m_mutex};
     std::shared_ptr<TrackableObject<T>> copy = lookup_emplace<T>();
     copy->set(std::make_shared<T>(std::forward<Args>(args)...));
-    m_pending.erase(
-        std::remove_if(begin(m_pending), end(m_pending), [&](auto& cb) {
-          bool satisfied = cb.satisfied(this);
-          if (satisfied) {
-            cb.call(this);
-          }
-          return satisfied;
-        }));
+    std::cout << "Size START: " << m_pending.size() << std::endl;
+    m_pending.erase(std::remove_if(begin(m_pending), end(m_pending),
+                                   [&](auto& cb) {
+                                     bool satisfied = cb.satisfied(this);
+                                     if (satisfied) {
+                                       cb.call(this);
+                                     }
+                                     return satisfied;
+                                   }),
+                    end(m_pending));
+    std::cout << "Size END: " << m_pending.size() << std::endl;
   }
 
   template <typename T, typename Fn>
@@ -163,7 +206,7 @@ class Context final {
   static constexpr auto lookup_type() {
     if constexpr (is_specialization_of<std::shared_ptr,
                                        std::decay_t<T>>::value) {
-      return std::decay_t<typename T::element_type>();
+      return std::decay_t<typename std::decay_t<T>::element_type>();
     } else if constexpr (std::is_pointer<std::decay_t<T>>()) {
       return std::decay_t<std::remove_pointer_t<std::decay_t<T>>>();
     } else {
@@ -182,20 +225,40 @@ class Context final {
     return copy->get();
   }
 
-  template <typename Callback>
-  void require(Callback&& callback) {
-    std::cout << "req callback " << m_pending.size() << std::endl;
-    RequirementCallback cb{callback};
-    for (const auto &[name, satisfied]: cb.listDependecies(this)) {
-        std::cout << "{" << name << ": " << (satisfied?"    ":"not ") << "satisfied}" << std::endl;
+  template <typename T>
+  static constexpr T convert_dep(std::shared_ptr<LookupType<T>>& sp) {
+    if constexpr (is_specialization_of<std::shared_ptr,
+                                       std::decay_t<T>>::value) {
+      return sp;
+    } else if constexpr (std::is_pointer<std::decay_t<T>>()) {
+      return sp.get();
+    } else {
+      return *sp.get();
     }
+  }
+
+  template <typename Callback>
+  void require(Callback&& callback, const std::string& name = "") {
+    RequirementCallback cb{callback, name};
     std::scoped_lock lk{m_mutex};
     if (cb.satisfied(this)) {
-      std::cout << "req satisfied " << m_pending.size() << std::endl;
       cb.call(this);
     } else {
+      std::cout << "pending: " << cb.declaration(this) << std::endl;
       m_pending.emplace_back(std::move(cb));
     }
+  }
+
+  std::vector<std::string> list_pending(bool deps = true) const {
+    std::vector<std::string> ret;
+    for (const auto& cb : m_pending) {
+      if (deps) {
+        ret.emplace_back(cb.declaration(this));
+      } else {
+        ret.emplace_back(cb.get_name());
+      }
+    }
+    return ret;
   }
 
  private:
