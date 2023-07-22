@@ -15,69 +15,73 @@ class Printer {
 
 class HelloWorld {
  public:
-  std::string getText() const { return "Hello World!"; }
+  std::string get_text() const { return "Hello World!"; }
 };
 
 void testcase1() {
-  requirecpp::Context dependencies;
+  requirecpp::Context context;
 
-  dependencies.require(
+  context.require(
       [](std::shared_ptr<Printer> printer,
          std::shared_ptr<HelloWorld> helloWorld) {
         std::cout << "Call: shared_ptr: ";
-        printer->print(helloWorld->getText());
+        printer->print(helloWorld->get_text());
       },
-      "shared_ptr");
-  dependencies.require(
+      "fn_shared_ptr");
+  context.require(
       [](const std::shared_ptr<Printer> printer,
          const std::shared_ptr<HelloWorld> helloWorld) {
         std::cout << "Call: const shared_ptr: ";
-        printer->print(helloWorld->getText());
+        printer->print(helloWorld->get_text());
       },
-      "const shared_ptr");
-  dependencies.require([](std::shared_ptr<Printer>& printer,
-                          std::shared_ptr<HelloWorld>& helloWorld) {
-    std::cout << "shared_ptr&" << std::endl;
-    printer->print(helloWorld->getText());
-  });
-  dependencies.require([](const std::shared_ptr<Printer>& printer,
-                          const std::shared_ptr<HelloWorld>& helloWorld) {
-    std::cout << "const shared_ptr&" << std::endl;
-    printer->print(helloWorld->getText());
-  });
-  dependencies.require(
-      [](const Printer* printer, const HelloWorld* helloWorld) {
-        std::cout << "Call: const *: ";
-        printer->print(helloWorld->getText());
+      "fn_const_shared_ptr");
+  context.require(
+      [](std::shared_ptr<Printer>& printer,
+         std::shared_ptr<HelloWorld>& helloWorld) {
+        std::cout << "Call: shared_ptr&" << std::endl;
+        printer->print(helloWorld->get_text());
       },
-      "const *");
-  dependencies.require(
+      "fn_shared_ptr_ref");
+  context.require(
+      [](const std::shared_ptr<Printer>& printer,
+         const std::shared_ptr<HelloWorld>& helloWorld) {
+        std::cout << "Call: const shared_ptr&" << std::endl;
+        printer->print(helloWorld->get_text());
+      },
+      "fn_const_shared_ptr_ref");
+  context.require(
       [](Printer* printer, HelloWorld* helloWorld) {
         std::cout << "Call: *: ";
-        printer->print(helloWorld->getText());
+        printer->print(helloWorld->get_text());
       },
-      "*");
-  dependencies.require(
-      [](const Printer& printer, const HelloWorld& helloWorld) {
-        std::cout << "Call: const &: ";
-        printer.print(helloWorld.getText());
+      "fn_ptr");
+  context.require(
+      [](const Printer* printer, const HelloWorld* helloWorld) {
+        std::cout << "Call: const *: ";
+        printer->print(helloWorld->get_text());
       },
-      "const &");
-  dependencies.require(
+      "fn_const_ptr");
+  context.require(
       [](Printer& printer, HelloWorld& helloWorld) {
         std::cout << "Call: &: ";
-        printer.print(helloWorld.getText());
+        printer.print(helloWorld.get_text());
       },
-      "&");
+      "fn_ref");
+  context.require(
+      [](const Printer& printer, const HelloWorld& helloWorld) {
+        std::cout << "Call: const &: ";
+        printer.print(helloWorld.get_text());
+      },
+      "fn_const_ref");
+
   const auto list_pening = [&] {
-    for (const auto& str : dependencies.list_pending()) {
+    for (const auto& str : context.list_pending()) {
       std::cout << str << std::endl;
     }
   };
+
   list_pening();
-
-  dependencies.emplace<Printer>();
-  dependencies.emplace<HelloWorld>();
-
+  context.emplace<Printer>();
+  context.emplace<HelloWorld>();
   list_pening();
 }

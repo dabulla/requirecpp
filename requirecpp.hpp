@@ -49,30 +49,11 @@ class Context final {
     }
   };
 
-  template <typename T>
-  struct DepConverter {
-    static T convert(std::shared_ptr<std::remove_reference_t<T>>& from) {
-      return *from;
-    }
-  };
-  template <typename T>
-  struct DepConverter<std::shared_ptr<T>> {
-    static std::shared_ptr<T> convert(
-        std::shared_ptr<std::remove_reference_t<T>>&& from) {
-      return from;
-    }
-  };
-  template <typename T>
-  struct DepConverter<T*> {
-    static T* convert(std::shared_ptr<std::remove_reference_t<T>>&& from) {
-      return from.get();
-    }
-  };
   template <typename... Deps>
   struct CallHelper {
     template <typename Callback>
     static void invoke(Context* ctx, Callback&& callback) {
-      callback(DepConverter<Deps>::convert(ctx->require<Deps>())...);
+      callback(convert_dep<Deps>(ctx->require<Deps>())...);
     }
   };
   template <typename... Deps>
@@ -174,8 +155,9 @@ class Context final {
   template <typename T, typename... Args>
   void emplace(Args&&... args) {
     std::scoped_lock lk{m_mutex};
-    std::shared_ptr<TrackableObject<T>> copy = lookup_emplace<T>();
-    copy->set(std::make_shared<T>(std::forward<Args>(args)...));
+    // todo prevent/handle overwrite
+    std::shared_ptr<TrackableObject<T>> copy =
+        lookup_emplace<T>(std::forward<Args>(args)...);
     std::cout << "Size START: " << m_pending.size() << std::endl;
     m_pending.erase(std::remove_if(begin(m_pending), end(m_pending),
                                    [&](auto& cb) {
@@ -203,18 +185,28 @@ class Context final {
   //    void emplace(const Args&& ...args);
 
   template <typename T>
+  struct DeclvalHelper {
+    using type = T;
+  };
+
+  template <typename T>
   static constexpr auto lookup_type() {
     if constexpr (is_specialization_of<std::shared_ptr,
                                        std::decay_t<T>>::value) {
-      return std::decay_t<typename std::decay_t<T>::element_type>();
+      return DeclvalHelper<
+          std::decay_t<typename std::decay_t<T>::element_type>>();
     } else if constexpr (std::is_pointer<std::decay_t<T>>()) {
-      return std::decay_t<std::remove_pointer_t<std::decay_t<T>>>();
+      return DeclvalHelper<
+          std::decay_t<std::remove_pointer_t<std::decay_t<T>>>>();
     } else {
-      return std::decay_t<T>();
+      return DeclvalHelper<std::decay_t<T>>();
     }
   }
+  // template <typename T>
+  // using LookupType = lookup_type<T>()::type;
   template <typename T>
-  using LookupType = std::invoke_result_t<decltype(lookup_type<T>)>;
+  using LookupType =
+      typename std::invoke_result_t<decltype(lookup_type<T>)>::type;
 
   template <typename T>
   std::shared_ptr<LookupType<T>> require() {
@@ -226,7 +218,7 @@ class Context final {
   }
 
   template <typename T>
-  static constexpr T convert_dep(std::shared_ptr<LookupType<T>>& sp) {
+  static constexpr T convert_dep(std::shared_ptr<LookupType<T>>&& sp) {
     if constexpr (is_specialization_of<std::shared_ptr,
                                        std::decay_t<T>>::value) {
       return sp;
@@ -267,8 +259,7 @@ class Context final {
   template <typename T>
   class TrackableObject {
    public:
-    TrackableObject(std::shared_ptr<T>&& obj = nullptr)
-        : m_object{std::move(obj)} {}
+    TrackableObject(std::shared_ptr<T> obj) : m_object{std::move(obj)} {}
     TrackableObject(const TrackableObject&) = delete;
     TrackableObject(TrackableObject&&) = delete;
     TrackableObject& operator=(const TrackableObject&) = delete;
@@ -331,23 +322,26 @@ class Context final {
     auto& objects = get_objects<T>();
     auto iter = objects.find(this);
     if (iter == end(objects)) {
+      auto p = std::make_shared<TrackableObject<LookupType<T>>>(nullptr);
       bool success;
-      std::tie(iter, success) = objects.try_emplace(
-          this, std::make_shared<Context::TrackableObject<LookupType<T>>>());
+      std::tie(iter, success) = objects.try_emplace(this, p);
     }
     return iter->second;
   }
   template <typename T, typename... Args>
-  std::shared_ptr<TrackableObject<LookupType<T>>> lookup_emplace(Args... args) {
+  std::shared_ptr<TrackableObject<LookupType<T>>> lookup_emplace(
+      Args&&... args) {
     auto& objects = get_objects<T>();
     auto iter = objects.find(this);
-    if (iter != end(objects)) {
-      throw std::invalid_argument{"Object type already registered"};
+    auto obj_ptr = std::make_shared<LookupType<T>>(std::forward<Args>(args)...);
+    if (iter == end(objects)) {
+      auto p = std::make_shared<TrackableObject<LookupType<T>>>(obj_ptr);
+      objects.try_emplace(this, p);
+      return p;
+    } else {
+      iter->second->set(obj_ptr);
+      return iter->second;
     }
-    auto p = std::make_shared<TrackableObject<LookupType<T>>>(
-        std::make_shared<LookupType<T>>(std::forward<Args>(args)...));
-    auto [obj, suc] = objects.emplace(this, p);
-    return obj->second;
   }
   template <typename T>
   static std::unordered_map<const Context*, std::shared_ptr<TrackableObject<T>>>
