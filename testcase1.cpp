@@ -38,14 +38,14 @@ void testcase1() {
   context.require(
       [](std::shared_ptr<Printer>& printer,
          std::shared_ptr<HelloWorld>& helloWorld) {
-        std::cout << "Call: shared_ptr&" << std::endl;
+        std::cout << "Call: shared_ptr&: ";
         printer->print(helloWorld->get_text());
       },
       "fn_shared_ptr_ref");
   context.require(
       [](const std::shared_ptr<Printer>& printer,
          const std::shared_ptr<HelloWorld>& helloWorld) {
-        std::cout << "Call: const shared_ptr&" << std::endl;
+        std::cout << "Call: const shared_ptr&: ";
         printer->print(helloWorld->get_text());
       },
       "fn_const_shared_ptr_ref");
@@ -80,8 +80,8 @@ void testcase1() {
     }
   };
 
-  list_pening();
+  // list_pening();
   context.emplace<Printer>();
   context.emplace<HelloWorld>();
-  list_pening();
+  // list_pening();
 }

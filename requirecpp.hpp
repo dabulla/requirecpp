@@ -158,7 +158,6 @@ class Context final {
     // todo prevent/handle overwrite
     std::shared_ptr<TrackableObject<T>> copy =
         lookup_emplace<T>(std::forward<Args>(args)...);
-    std::cout << "Size START: " << m_pending.size() << std::endl;
     m_pending.erase(std::remove_if(begin(m_pending), end(m_pending),
                                    [&](auto& cb) {
                                      bool satisfied = cb.satisfied(this);
@@ -168,7 +167,6 @@ class Context final {
                                      return satisfied;
                                    }),
                     end(m_pending));
-    std::cout << "Size END: " << m_pending.size() << std::endl;
   }
 
   template <typename T, typename Fn>
@@ -236,7 +234,7 @@ class Context final {
     if (cb.satisfied(this)) {
       cb.call(this);
     } else {
-      std::cout << "pending: " << cb.declaration(this) << std::endl;
+      // std::cout << "pending: " << cb.declaration(this) << std::endl;
       m_pending.emplace_back(std::move(cb));
     }
   }

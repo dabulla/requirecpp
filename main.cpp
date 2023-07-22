@@ -6,6 +6,8 @@
 using namespace requirecpp;
 using namespace std::chrono_literals;
 
+// example with objects aware of requirecpp
+
 class Egg;
 
 class Chicken {
@@ -43,9 +45,6 @@ void Egg::laid_by(const Chicken& chicken) const {
 
 int main() {
   try {
-    requirecpp::Context tmp;
-    Chicken t(tmp, "sss");
-    auto a = std::make_shared<Egg>(tmp, "sss");
     requirecpp::Context ctx;
     ctx.emplace<Chicken>(ctx, "Chuck");
     ctx.emplace<Egg>(ctx, "Egg3000");
