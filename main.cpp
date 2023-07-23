@@ -13,7 +13,12 @@ class Egg;
 class Chicken {
  public:
   Chicken(requirecpp::Context& ctx, const std::string& name) : m_name{name} {
-    ctx.require([this](const Egg& egg) { hatched_from(egg); }, "hatched_from");
+    ctx.require(
+        [this, &ctx](const Egg& egg) {
+          hatched_from(egg);
+          ctx.emplace<decorator::StateDecoration<Chicken, 0>>();
+        },
+        "hatched_from");
   }
   void hatched_from(const Egg& egg) const;
   std::string get_name() const { return m_name; }
@@ -46,15 +51,42 @@ void Egg::laid_by(const Chicken& chicken) const {
 int main() {
   try {
     requirecpp::Context ctx;
-    ctx.emplace<Chicken>(ctx, "Chuck");
-    ctx.emplace<Egg>(ctx, "Egg3000");
-
+    auto chicken = ctx.emplace<Chicken>(ctx, "Chuck");
+    auto egg = ctx.emplace<Egg>(ctx, "Egg3000");
+    ctx.print_pending();
+    ctx.require(
+        [](const decorator::StateDecoration<Chicken, 2>& o) {
+          std::cout << "chicken is two years old " << o.object->get_name()
+                    << std::endl;
+        },
+        "state 2");
+    ctx.print_pending();
+    ctx.require(
+        [](const decorator::StateDecoration<Chicken, 0>&) {
+          std::cout << "chicken was born" << std::endl;
+        },
+        "state 0");
+    ctx.print_pending();
+    ctx.emplace<decorator::StateDecoration<Chicken, 1>>(chicken);
+    ctx.require(
+        [](const decorator::StateDecoration<Chicken, 1>&) {
+          std::cout << "chicken is one year old" << std::endl;
+        },
+        "state 1");
+    ctx.emplace<decorator::StateDecoration<Chicken, 2>>(chicken);
+    ctx.emplace<decorator::StateDecoration<Chicken, 3>>(chicken);
+    ctx.require(
+        [](const decorator::StateDecoration<Chicken, 3>&) {
+          std::cout << "chicken is three years old" << std::endl;
+        },
+        "state 3");
+    ctx.print_pending();
     std::cout << "Start Test" << std::endl;
-    testcase1();
-    //        testcase1();
-    //        testcase1();
-    //        testcase1();
-    //        testcase1();
+    // testcase1();
+    //         testcase1();
+    //         testcase1();
+    //         testcase1();
+    //         testcase1();
     std::cout << "Done" << std::endl;
     return 0;
   } catch (const std::exception& e) {

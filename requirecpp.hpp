@@ -21,93 +21,38 @@
 
 namespace requirecpp {
 
-template <class F>
-class finally {
- public:
-  explicit finally(F&& action) noexcept : m_action(std::forward<F>(action)) {}
-  finally(const finally&) = delete;
-  finally(finally&&) = delete;
-  finally& operator=(const finally&) = delete;
-  finally& operator=(finally&&) = delete;
-  ~finally() { m_action(); }
-
- private:
-  F m_action;
-};
-
 class Context final {
  private:
-  template <typename... Tail>
-  struct Satisfied {
-    static bool satisfied(const Context* ctx) { return true; }
-  };
-
-  template <typename T, typename... Tail>
-  struct Satisfied<T, Tail...> {
-    static bool satisfied(const Context* ctx) {
-      return ctx->exists<T>() && Satisfied<Tail...>::satisfied(ctx);
-    }
-  };
-
-  template <typename... Deps>
-  struct CallHelper {
-    template <typename Callback>
-    static void invoke(Context* ctx, Callback&& callback) {
-      callback(convert_dep<Deps>(ctx->require<Deps>())...);
-    }
-  };
-  template <typename... Deps>
-  struct DebugInfo {
-    static std::unordered_map<std::string, bool> list(const Context* ctx) {
-      return {};
-    }
-  };
-  template <typename Dep, typename... Deps>
-  struct DebugInfo<Dep, Deps...> {
-    static std::unordered_map<std::string, bool> list(const Context* ctx) {
-      bool satisfied = Satisfied<Dep>::satisfied(ctx);
-      auto pair = std::make_pair(
-          type_pretty<Dep>() + " -> " + type_pretty<LookupType<Dep>>(),
-          satisfied);
-      auto set = DebugInfo<Deps...>::list(ctx);
-      set.emplace(pair);
-      return set;
-    }
-  };
-
-  class RequirementCallback {
+  class Callback {
    public:
-    template <typename Callback>
-    RequirementCallback(Callback&& callback, const std::string& name)
-        : m_name{name} {
-      auto tmp = [name](const Context* ctx) {
-        auto list = closure_traits<Callback>::template unpack_arguments_to<
-            DebugInfo>::list(ctx);
-        for (const auto& [dep, satisfied] : list) {
-          std::cout << name << "{" << dep << ": "
-                    << (satisfied ? "    " : "not ") << "satisfied}"
-                    << std::endl;
-        }
-      };
-      m_satisfied = [tmp](const Context* ctx) -> bool {
-        // tmp(ctx);
-        return closure_traits<Callback>::template unpack_arguments_to<
+    Callback(const Callback&) = delete;
+    Callback(Callback&&) = default;
+    Callback& operator=(const Callback&) = delete;
+    Callback& operator=(Callback&&) = default;
+    ~Callback() = default;
+    template <typename Fn>
+    Callback(Fn&& callback, const std::string& name)
+        : m_called{std::make_unique<std::atomic_flag>()}, m_name{name} {
+      m_satisfied = [](const Context* ctx) -> bool {
+        return closure_traits<Fn>::template unpack_arguments_to<
             Satisfied>::satisfied(ctx);
       };
-      m_callback = [callback, tmp](Context* ctx) -> void {
-        // tmp(ctx);
-        closure_traits<Callback>::template unpack_arguments_to<
-            CallHelper>::invoke(ctx, callback);
+      m_callback = [cb = std::forward<Fn>(callback)](Context* ctx) -> void {
+        closure_traits<Fn>::template unpack_arguments_to<CallHelper>::invoke(
+            ctx, cb);
       };
       m_debug =
           [](const Context* ctx) -> std::unordered_map<std::string, bool> {
-        return closure_traits<Callback>::template unpack_arguments_to<
+        return closure_traits<Fn>::template unpack_arguments_to<
             DebugInfo>::list(ctx);
       };
     }
 
     bool satisfied(const Context* ctx) { return m_satisfied(ctx); }
-    void call(Context* ctx) { return m_callback(ctx); }
+    void call(Context* ctx) {
+      if (!m_called->test_and_set())
+        m_callback(ctx);
+    }
     std::unordered_map<std::string, bool> list_dependecies(
         const Context* ctx) const {
       return m_debug(ctx);
@@ -137,11 +82,50 @@ class Context final {
     }
 
    private:
+    std::unique_ptr<std::atomic_flag> m_called;
     std::function<bool(const Context*)> m_satisfied;
     std::function<void(Context*)> m_callback;
     std::function<std::unordered_map<std::string, bool>(const Context*)>
         m_debug;
     std::string m_name;
+
+    template <typename... Tail>
+    struct Satisfied {
+      static bool satisfied(const Context* ctx) { return true; }
+    };
+
+    template <typename T, typename... Tail>
+    struct Satisfied<T, Tail...> {
+      static bool satisfied(const Context* ctx) {
+        return ctx->exists<T>() && Satisfied<Tail...>::satisfied(ctx);
+      }
+    };
+
+    template <typename... Deps>
+    struct CallHelper {
+      template <typename Callback>
+      static void invoke(Context* ctx, Callback&& callback) {
+        callback(convert_dep<Deps>(ctx->require<Deps>())...);
+      }
+    };
+    template <typename... Deps>
+    struct DebugInfo {
+      static std::unordered_map<std::string, bool> list(const Context* ctx) {
+        return {};
+      }
+    };
+    template <typename Dep, typename... Deps>
+    struct DebugInfo<Dep, Deps...> {
+      static std::unordered_map<std::string, bool> list(const Context* ctx) {
+        bool satisfied = Satisfied<Dep>::satisfied(ctx);
+        auto pair = std::make_pair(
+            type_pretty<Dep>() + " -> " + type_pretty<LookupType<Dep>>(),
+            satisfied);
+        auto set = DebugInfo<Deps...>::list(ctx);
+        set.emplace(pair);
+        return set;
+      }
+    };
   };
 
  public:
@@ -153,34 +137,20 @@ class Context final {
   ~Context() = default;
 
   template <typename T, typename... Args>
-  void emplace(Args&&... args) {
+  std::shared_ptr<T> emplace(Args&&... args) {
     std::scoped_lock lk{m_mutex};
     // todo prevent/handle overwrite
-    std::shared_ptr<TrackableObject<T>> copy =
-        lookup_emplace<T>(std::forward<Args>(args)...);
-    m_pending.erase(std::remove_if(begin(m_pending), end(m_pending),
-                                   [&](auto& cb) {
-                                     bool satisfied = cb.satisfied(this);
-                                     if (satisfied) {
-                                       cb.call(this);
-                                     }
-                                     return satisfied;
-                                   }),
-                    end(m_pending));
+    auto p = lookup_emplace<T>(std::forward<Args>(args)...);
+    check_pending();
+    return p;
   }
-
-  template <typename T, typename Fn>
-  void provide(Fn&& callback) {}
-
-  // does not manage the objects lifetime
   template <typename T>
-  void publish(const T& obj);
-
-  //    template<typename ...Args>
-  //    void push(const Args&& ...args);
-
-  //    template<typename T, typename ...Args>
-  //    void emplace(const Args&& ...args);
+  void push(std::shared_ptr<T>&& p) {
+    std::scoped_lock lk{m_mutex};
+    // todo prevent/handle overwrite
+    lookup_push(p);
+    check_pending();
+  }
 
   template <typename T>
   struct DeclvalHelper {
@@ -212,7 +182,7 @@ class Context final {
     std::shared_ptr<TrackableObject<LookupType<T>>> copy =
         lookup_or_create<T>();
     lk.unlock();
-    return copy->get();
+    return copy->blocking_get();
   }
 
   template <typename T>
@@ -227,20 +197,21 @@ class Context final {
     }
   }
 
-  template <typename Callback>
-  void require(Callback&& callback, const std::string& name = "") {
-    RequirementCallback cb{callback, name};
+  template <typename Fn>
+  void require(Fn&& callback, const std::string& name = "unnamed") {
+    Callback cb{callback, name};
     std::scoped_lock lk{m_mutex};
     if (cb.satisfied(this)) {
       cb.call(this);
     } else {
-      // std::cout << "pending: " << cb.declaration(this) << std::endl;
+      // std::cout << "add pending: " << cb.declaration(this) << std::endl;
       m_pending.emplace_back(std::move(cb));
     }
   }
 
   std::vector<std::string> list_pending(bool deps = true) const {
     std::vector<std::string> ret;
+    std::scoped_lock lk{m_mutex};
     for (const auto& cb : m_pending) {
       if (deps) {
         ret.emplace_back(cb.declaration(this));
@@ -249,6 +220,17 @@ class Context final {
       }
     }
     return ret;
+  }
+  void print_pending(bool deps = true) const {
+    std::scoped_lock lk{m_mutex};
+    if (m_pending.empty())
+      std::cout << "No pending requirements." << std::endl;
+    else {
+      auto v = list_pending(deps);
+      for (const auto& str : v) {
+        std::cout << str << std::endl;
+      }
+    }
   }
 
  private:
@@ -262,7 +244,7 @@ class Context final {
     TrackableObject(TrackableObject&&) = delete;
     TrackableObject& operator=(const TrackableObject&) = delete;
     TrackableObject& operator=(TrackableObject&&) = delete;
-    ~TrackableObject() { assert(m_pending == 0); }
+    ~TrackableObject() = default;
 
     void set(const std::shared_ptr<T>& obj) {
       std::unique_lock lk{m_mutex};
@@ -271,10 +253,8 @@ class Context final {
       m_cv.notify_all();
     }
     // blocking
-    std::shared_ptr<T> get() {
+    std::shared_ptr<T> blocking_get() {
       std::unique_lock lk{m_mutex};
-      m_pending++;
-      finally final_action{[&] { m_pending--; }};
       m_cv.wait(lk, [&] { return m_shutdown || m_object != nullptr; });
       if (m_shutdown)
         throw std::runtime_error{"Could not get object"};
@@ -289,15 +269,31 @@ class Context final {
       m_cv.notify_all();
     }
 
-   private:
-    uint32_t m_pending{0};
+    bool has_value() const { return m_object != nullptr; }
 
+   private:
     std::shared_ptr<T> m_object;
     bool m_shutdown{false};
     std::mutex m_mutex;
     std::condition_variable m_cv;
   };
-  std::recursive_mutex m_mutex;
+  mutable std::recursive_mutex m_mutex;
+
+  void check_pending() {
+    std::deque<Callback> cbs;
+    std::erase_if(m_pending, [&](auto& cb) {
+      bool satisfied = cb.satisfied(this);
+      if (satisfied) {
+        cbs.emplace_back(std::move(cb));
+      }
+      return satisfied;
+    });
+    for (auto& cb : cbs) {
+      // todo cbs can remove objects and may cannot execute. move back to
+      // m_pending? recurse?
+      cb.call(this);
+    }
+  }
 
   // lookup, decays type, handles shared_ptr
   template <typename T>
@@ -310,13 +306,15 @@ class Context final {
   }
   template <typename T>
   bool exists() const {
+    std::shared_lock objects_lk{Context::s_objects_mutex<LookupType<T>>};
     const auto& objects = get_objects<T>();
     const auto& iter = objects.find(this);
     return iter != end(objects) && iter->second != nullptr &&
-           iter->second->get() != nullptr;
+           iter->second->has_value();
   }
   template <typename T>
   std::shared_ptr<TrackableObject<LookupType<T>>> lookup_or_create() {
+    std::scoped_lock objects_lk{Context::s_objects_mutex<LookupType<T>>};
     auto& objects = get_objects<T>();
     auto iter = objects.find(this);
     if (iter == end(objects)) {
@@ -327,27 +325,45 @@ class Context final {
     return iter->second;
   }
   template <typename T, typename... Args>
-  std::shared_ptr<TrackableObject<LookupType<T>>> lookup_emplace(
-      Args&&... args) {
+  std::shared_ptr<T> lookup_emplace(Args&&... args) {
+    static_assert(std::is_same<LookupType<T>, T>::value,
+                  "emplace type must be same as lookup type");
+    std::scoped_lock objects_lk{Context::s_objects_mutex<T>};
     auto& objects = get_objects<T>();
     auto iter = objects.find(this);
-    auto obj_ptr = std::make_shared<LookupType<T>>(std::forward<Args>(args)...);
+    auto obj_ptr = std::make_shared<T>(std::forward<Args>(args)...);
     if (iter == end(objects)) {
-      auto p = std::make_shared<TrackableObject<LookupType<T>>>(obj_ptr);
-      objects.try_emplace(this, p);
-      return p;
+      objects.try_emplace(this, std::make_shared<TrackableObject<T>>(obj_ptr));
     } else {
       iter->second->set(obj_ptr);
-      return iter->second;
+    }
+    return obj_ptr;
+  }
+  template <typename T>
+  void lookup_push(std::shared_ptr<T> obj_ptr) {
+    static_assert(std::is_same<LookupType<T>, T>::value,
+                  "emplace type must be same as lookup type");
+    std::scoped_lock objects_lk{Context::s_objects_mutex<T>};
+    auto& objects = get_objects<T>();
+    auto iter = objects.find(this);
+    if (iter == end(objects)) {
+      objects.try_emplace(this, std::make_shared<TrackableObject<T>>(obj_ptr));
+    } else {
+      iter->second->set(obj_ptr);
     }
   }
   template <typename T>
   static std::unordered_map<const Context*, std::shared_ptr<TrackableObject<T>>>
       s_objects;
+  template <typename T>
+  static std::shared_mutex s_objects_mutex;
 
-  std::vector<RequirementCallback> m_pending;
+  std::deque<Callback> m_pending;
 };
 template <typename T>
 std::unordered_map<const Context*, std::shared_ptr<Context::TrackableObject<T>>>
     Context::s_objects;
+
+template <typename T>
+std::shared_mutex Context::s_objects_mutex;
 }  // namespace requirecpp

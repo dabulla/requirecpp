@@ -8,6 +8,11 @@ using namespace std::chrono_literals;
 
 class Printer {
  public:
+  Printer() = default;
+  Printer(const Printer&) = delete;
+  Printer(Printer&&) = delete;
+  Printer& operator=(const Printer&) = delete;
+  Printer& operator=(Printer&&) = delete;
   void print(const std::string& text) const {
     std::cout << "Printer prints: " << text << std::endl;
   }
@@ -74,14 +79,6 @@ void testcase1() {
       },
       "fn_const_ref");
 
-  const auto list_pening = [&] {
-    for (const auto& str : context.list_pending()) {
-      std::cout << str << std::endl;
-    }
-  };
-
-  // list_pening();
   context.emplace<Printer>();
   context.emplace<HelloWorld>();
-  // list_pening();
 }
