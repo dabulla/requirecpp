@@ -1,8 +1,7 @@
 #include <atomic>
 #include <iostream>
 #include <thread>
-#include "requirecpp.hpp"
-#include "testcases.h"
+#include "requirecpp/requirecpp.hpp"
 
 using namespace std::chrono_literals;
 
@@ -23,7 +22,7 @@ class HelloWorld {
   std::string get_text() const { return "Hello World!"; }
 };
 
-void testcase1() {
+int main() {
   requirecpp::Context context;
 
   context.require(

@@ -1,7 +1,7 @@
 #include <iostream>
 #include <thread>
-#include "requirecpp.hpp"
-#include "testcases.h"
+#include "requirecpp/decorators.hpp"
+#include "requirecpp/requirecpp.hpp"
 
 using namespace requirecpp;
 using namespace std::chrono_literals;
@@ -16,7 +16,7 @@ class Chicken {
     ctx.require(
         [this, &ctx](const Egg& egg) {
           hatched_from(egg);
-          ctx.emplace<decorator::StateDecoration<Chicken, 0>>();
+          ctx.emplace<decorator::Tagged<Chicken, 0>>();
         },
         "hatched_from");
   }
@@ -53,41 +53,30 @@ int main() {
     requirecpp::Context ctx;
     auto chicken = ctx.emplace<Chicken>(ctx, "Chuck");
     auto egg = ctx.emplace<Egg>(ctx, "Egg3000");
-    ctx.print_pending();
     ctx.require(
-        [](const decorator::StateDecoration<Chicken, 2>& o) {
+        [](const decorator::Tagged<Chicken, 2>& o) {
           std::cout << "chicken is two years old " << o.object->get_name()
                     << std::endl;
         },
         "state 2");
-    ctx.print_pending();
     ctx.require(
-        [](const decorator::StateDecoration<Chicken, 0>&) {
+        [](const decorator::Tagged<Chicken, 0>&) {
           std::cout << "chicken was born" << std::endl;
         },
         "state 0");
-    ctx.print_pending();
-    ctx.emplace<decorator::StateDecoration<Chicken, 1>>(chicken);
+    ctx.emplace<decorator::Tagged<Chicken, 1>>(chicken);
     ctx.require(
-        [](const decorator::StateDecoration<Chicken, 1>&) {
+        [](const decorator::Tagged<Chicken, 1>&) {
           std::cout << "chicken is one year old" << std::endl;
         },
         "state 1");
-    ctx.emplace<decorator::StateDecoration<Chicken, 2>>(chicken);
-    ctx.emplace<decorator::StateDecoration<Chicken, 3>>(chicken);
+    ctx.emplace<decorator::Tagged<Chicken, 2>>(chicken);
+    ctx.emplace<decorator::Tagged<Chicken, 3>>(chicken);
     ctx.require(
-        [](const decorator::StateDecoration<Chicken, 3>&) {
+        [](const decorator::Tagged<Chicken, 3>&) {
           std::cout << "chicken is three years old" << std::endl;
         },
         "state 3");
-    ctx.print_pending();
-    std::cout << "Start Test" << std::endl;
-    // testcase1();
-    //         testcase1();
-    //         testcase1();
-    //         testcase1();
-    //         testcase1();
-    std::cout << "Done" << std::endl;
     return 0;
   } catch (const std::exception& e) {
     std::cout << "Exception: " << e.what() << std::endl << std::endl;
