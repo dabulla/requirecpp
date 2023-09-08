@@ -49,7 +49,6 @@ int main() {
     requirecpp::Context ctx;
     auto chicken = ctx.emplace<Chicken>(ctx, "Chuck");
     auto egg = ctx.emplace<Egg>(ctx, "Egg3000");
-    return 0;
   } catch (const std::exception& e) {
     std::cout << "Exception: " << e.what() << std::endl << std::endl;
   }
