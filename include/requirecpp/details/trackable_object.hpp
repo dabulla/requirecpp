@@ -7,7 +7,9 @@
 namespace requirecpp::details {
 
 // if there are pending get() calls, make sure the object is not destroyed,
-// call fail() first and ensure get() requests returned.
+// destruction: if there are pending blocking_get() calls, they hold a
+// shared_ptr.
+//   blocking calls might be stopped with fail()
 template <typename T>
 class TrackableObject {
  public:
@@ -26,7 +28,7 @@ class TrackableObject {
   }
 
   // blocking
-  std::shared_ptr<T> blocking_get() {
+  std::shared_ptr<T> require() {
     std::unique_lock lk{m_mutex};
     m_cv.wait(lk, [&] { return m_shutdown || m_object != nullptr; });
     if (m_shutdown)
@@ -35,8 +37,15 @@ class TrackableObject {
   }
 
   // non blocking, may return nullptr
-  std::shared_ptr<T> try_get() {
+  std::shared_ptr<T> optional() {
     std::unique_lock lk{m_mutex};
+    return m_object;
+  }
+
+  std::shared_ptr<T> now_or_throw() {
+    std::unique_lock lk{m_mutex};
+    if (!m_object)
+      throw std::runtime_error{"Could not retrieve object"};
     return m_object;
   }
 

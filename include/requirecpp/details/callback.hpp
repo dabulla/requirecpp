@@ -103,7 +103,7 @@ class Callback {
     }
     template <typename Callback>
     static void invoke(Context* ctx, Callback&& callback) {
-      callback(convert_dep<Deps>(ctx->require<Deps>())...);
+      callback(convert_dep<Deps>(ctx->get<Deps>()->now_or_throw())...);
     }
   };
   template <typename... Deps>

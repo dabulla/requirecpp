@@ -30,7 +30,7 @@ class Egg {
   std::string m_label;
 };
 ```
-Resolve chicken/egg problem with dependency management by requirecpp magic:
+Dependency management by requirecpp:
 ```cpp
 int main() {
   requirecpp::Context ctx;
@@ -53,6 +53,12 @@ Output:
 Chuck hatched from Egg3000
 Egg3000 laid by Chuck
 ```
+
+Why didn't we just create the `Chicken` and `Egg` and then just call their methods?
+In bigger projects you might find more components with dependecies for the different functions they have and that's where `requirecpp` shines.
+Imagine there is a project with components `Database`, `UserService`, `Settings`, `InputReader`, `Webserver`, ... and they all depend upon each other.
+`requirecpp` takes the burden from you to care about the order of initialization and enables you to add in components easily, manage, find and debug cyclic dependecies.
+Lifecycle management of components can be handled cleanly in a multithreaded environment.
 
 - Can be used without infecting your precious components with a dependency to `requirecpp` (see above example, `Chicken` and `Egg` are not aware of `requirecpp`)
 - Components can be aware of `requirecpp` and manage their dependecies on their own. No glue code required to setup and compose your components.

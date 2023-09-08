@@ -8,11 +8,18 @@
 
 namespace requirecpp {
 
+Context::~Context() {
+  for (auto dtor : m_destructors) {
+    dtor();
+  }
+}
+
 template <typename T, typename... Args>
 std::shared_ptr<T> Context::emplace(Args&&... args) {
   std::scoped_lock lk{m_mutex};
   // todo prevent/handle overwrite
-  auto p = lookup_emplace<T>(std::forward<Args>(args)...);
+  auto p = std::make_shared<T>(std::forward<Args>(args)...);
+  lookup_set_create<LookupType<T>>(p);
   check_pending();
   return p;
 }
@@ -21,7 +28,7 @@ template <typename T>
 void Context::push(const std::shared_ptr<T>& p) {
   std::scoped_lock lk{m_mutex};
   // todo prevent/handle overwrite
-  lookup_push(p);
+  lookup_set_create<LookupType<T>>(p);
   check_pending();
 }
 
@@ -62,30 +69,17 @@ void Context::print_pending(bool deps) const {
 }
 
 template <typename T>
-std::shared_ptr<LookupType<T>> Context::require() {
+std::shared_ptr<details::TrackableObject<LookupType<T>>> Context::get() {
   std::unique_lock lk{m_mutex};
-  std::shared_ptr<details::TrackableObject<LookupType<T>>> copy =
-      lookup_or_create<T>();
-  lk.unlock();
-  return copy->blocking_get();
-}
-
-template <typename T>
-std::shared_ptr<LookupType<T>> Context::try_get() {
-  std::unique_lock lk{m_mutex};
-  std::shared_ptr<details::TrackableObject<LookupType<T>>> copy =
-      lookup_or_create<T>();
-  lk.unlock();
-  return copy->try_get();
+  return lookup_set_create<LookupType<T>>();
 }
 
 template <typename T>
 std::shared_ptr<LookupType<T>> Context::remove() {
   std::unique_lock lk{m_mutex};
-  std::shared_ptr<details::TrackableObject<LookupType<T>>> copy =
-      lookup_or_create<T>();
+  auto object = lookup_remove<T>();
   lk.unlock();
-  return copy->try_get();
+  return object;
 }
 
 void Context::check_pending() {
@@ -114,64 +108,40 @@ bool Context::exists() const {
 }
 
 template <typename T>
-std::shared_ptr<details::TrackableObject<LookupType<T>>>
-Context::lookup_or_create() {
-  std::scoped_lock objects_lk{Context::s_objects_mutex<LookupType<T>>};
-  auto& objects = Context::s_objects<LookupType<T>>;
-  auto iter = objects.find(this);
-  if (iter == end(objects)) {
-    auto p = std::make_shared<details::TrackableObject<LookupType<T>>>(nullptr);
-    bool success;
-    std::tie(iter, success) = objects.try_emplace(this, p);
-  }
-  return iter->second;
-}
-
-template <typename T>
 std::shared_ptr<LookupType<T>> Context::lookup_remove() {
+  static_assert(std::is_same<LookupType<T>, T>::value,
+                "emplace type must be same as lookup type");
   std::scoped_lock objects_lk{Context::s_objects_mutex<LookupType<T>>};
   auto& objects = Context::s_objects<LookupType<T>>;
   auto iter = objects.find(this);
   if (iter != end(objects)) {
     auto trackable = iter->second;
-    auto p = trackable->try_get();
+    auto p = trackable->optional();
+    trackable->fail();
     objects.erase(iter);
     return p;
   }
-  objects.erase(iter);
   return nullptr;
 }
 
-template <typename T, typename... Args>
-std::shared_ptr<T> Context::lookup_emplace(Args&&... args) {
-  static_assert(std::is_same<LookupType<T>, T>::value,
-                "emplace type must be same as lookup type");
-  std::scoped_lock objects_lk{Context::s_objects_mutex<T>};
-  auto& objects = Context::s_objects<LookupType<T>>;
-  auto iter = objects.find(this);
-  auto obj_ptr = std::make_shared<T>(std::forward<Args>(args)...);
-  if (iter == end(objects)) {
-    objects.try_emplace(this,
-                        std::make_shared<details::TrackableObject<T>>(obj_ptr));
-  } else {
-    iter->second->set(obj_ptr);
-  }
-  return obj_ptr;
-}
-
+// retrieve, set or create empty trackable object
 template <typename T>
-void Context::lookup_push(std::shared_ptr<T> obj_ptr) {
+std::shared_ptr<details::TrackableObject<LookupType<T>>>
+Context::lookup_set_create(std::shared_ptr<T> obj_ptr) {
   static_assert(std::is_same<LookupType<T>, T>::value,
                 "emplace type must be same as lookup type");
   std::scoped_lock objects_lk{Context::s_objects_mutex<T>};
   auto& objects = Context::s_objects<LookupType<T>>;
   auto iter = objects.find(this);
   if (iter == end(objects)) {
-    objects.try_emplace(this,
-                        std::make_shared<details::TrackableObject<T>>(obj_ptr));
-  } else {
+    bool success;
+    std::tie(iter, success) = objects.try_emplace(
+        this, std::make_shared<details::TrackableObject<T>>(obj_ptr));
+    m_destructors.emplace_back([this] { remove<T>(); });
+  } else if (obj_ptr != nullptr) {
     iter->second->set(obj_ptr);
   }
+  return iter->second;
 }
 
 template <typename T>

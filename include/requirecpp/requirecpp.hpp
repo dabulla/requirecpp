@@ -26,7 +26,7 @@ class Context final {
   Context(Context&&) = delete;
   Context& operator=(const Context&) = delete;
   Context& operator=(Context&&) = delete;
-  ~Context() = default;
+  ~Context();
 
   template <typename T, typename... Args>
   std::shared_ptr<T> emplace(Args&&... args);
@@ -37,11 +37,7 @@ class Context final {
   void require(Fn&& callback, const std::string& name = "unnamed");
 
   template <typename T>
-  std::shared_ptr<LookupType<T>> require();
-
-  // may return nullptr
-  template <typename T>
-  std::shared_ptr<LookupType<T>> try_get();
+  std::shared_ptr<details::TrackableObject<LookupType<T>>> get();
 
   template <typename T>
   std::shared_ptr<LookupType<T>> remove();
@@ -56,18 +52,15 @@ class Context final {
   void check_pending();
 
   template <typename T>
-  std::shared_ptr<details::TrackableObject<LookupType<T>>> lookup_or_create();
-
-  template <typename T>
   std::shared_ptr<LookupType<T>> lookup_remove();
 
-  template <typename T, typename... Args>
-  std::shared_ptr<T> lookup_emplace(Args&&... args);
   template <typename T>
-  void lookup_push(std::shared_ptr<T> obj_ptr);
+  std::shared_ptr<details::TrackableObject<LookupType<T>>> lookup_set_create(
+      std::shared_ptr<T> obj_ptr = nullptr);
 
   mutable std::recursive_mutex m_mutex;
   std::deque<details::Callback> m_pending;
+  std::deque<std::function<void()>> m_destructors;
 
   template <typename T>
   static std::unordered_map<const Context*,

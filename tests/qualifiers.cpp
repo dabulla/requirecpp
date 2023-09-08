@@ -1,6 +1,4 @@
-#include <atomic>
 #include <iostream>
-#include <thread>
 #include "requirecpp/requirecpp.hpp"
 
 using namespace std::chrono_literals;

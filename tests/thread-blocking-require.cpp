@@ -1,83 +1,45 @@
-#include <atomic>
+#include <barrier>
 #include <iostream>
 #include <thread>
 #include "requirecpp/requirecpp.hpp"
 
-using namespace std::chrono_literals;
-
-class Printer {
- public:
-  Printer() = default;
-  Printer(const Printer&) = delete;
-  Printer(Printer&&) = delete;
-  Printer& operator=(const Printer&) = delete;
-  Printer& operator=(Printer&&) = delete;
-  void print(const std::string& text) const {
-    std::cout << "Printer prints: " << text << std::endl;
-  }
-};
-
-class HelloWorld {
- public:
-  std::string get_text() const { return "Hello World!"; }
-};
+class Clazz1 {};
+class Clazz2 {};
+class Clazz3 {};
 
 int main() {
-  requirecpp::Context context;
+  {
+    requirecpp::Context context;
+    std::jthread thread1{[&] {
+      std::cout << "thread1: " << *context.get<std::string>()->require()
+                << std::endl;
+    }};
+    context.emplace<std::string>("Hello");
+  }
+  {
+    std::barrier barrier1{2};
+    std::barrier barrier2{2};
+    auto context = std::make_shared<requirecpp::Context>();
+    std::jthread thread1{[&] {
+      try {
+        auto obj1 = context->get<Clazz1>()->require();
+      } catch (const std::exception& e) {
+        std::cout << "thread2: Requirement clazz1 unsatisfied: " << e.what()
+                  << std::endl;
+      }
+      try {
+        auto obj2 = context->get<Clazz2>();
+        barrier1.arrive_and_wait();
+        obj2->require();
+      } catch (const std::exception& e) {
+        std::cout << "thread2: Requirement clazz2 unsatisfied: " << e.what()
+                  << std::endl;
+      }
+    }};
+    context->get<Clazz1>()->fail();
 
-  context.require(
-      [](std::shared_ptr<Printer> printer,
-         std::shared_ptr<HelloWorld> helloWorld) {
-        std::cout << "Call: shared_ptr: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_shared_ptr");
-  context.require(
-      [](const std::shared_ptr<Printer> printer,
-         const std::shared_ptr<HelloWorld> helloWorld) {
-        std::cout << "Call: const shared_ptr: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_const_shared_ptr");
-  context.require(
-      [](std::shared_ptr<Printer>& printer,
-         std::shared_ptr<HelloWorld>& helloWorld) {
-        std::cout << "Call: shared_ptr&: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_shared_ptr_ref");
-  context.require(
-      [](const std::shared_ptr<Printer>& printer,
-         const std::shared_ptr<HelloWorld>& helloWorld) {
-        std::cout << "Call: const shared_ptr&: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_const_shared_ptr_ref");
-  context.require(
-      [](Printer* printer, HelloWorld* helloWorld) {
-        std::cout << "Call: *: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_ptr");
-  context.require(
-      [](const Printer* printer, const HelloWorld* helloWorld) {
-        std::cout << "Call: const *: ";
-        printer->print(helloWorld->get_text());
-      },
-      "fn_const_ptr");
-  context.require(
-      [](Printer& printer, HelloWorld& helloWorld) {
-        std::cout << "Call: &: ";
-        printer.print(helloWorld.get_text());
-      },
-      "fn_ref");
-  context.require(
-      [](const Printer& printer, const HelloWorld& helloWorld) {
-        std::cout << "Call: const &: ";
-        printer.print(helloWorld.get_text());
-      },
-      "fn_const_ref");
-
-  context.emplace<Printer>();
-  context.emplace<HelloWorld>();
+    barrier1.arrive_and_wait();
+    // it is safe to destruct context, while a requirement is blocking
+    context.reset();
+  }
 }

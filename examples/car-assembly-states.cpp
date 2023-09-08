@@ -96,7 +96,7 @@ class CarFactory {
 
   bool pull_car() {
     // make sure car has wheels while pulling
-    auto wheels = m_ctx.try_get<Wheels>();
+    auto wheels = m_ctx.get<Wheels>()->optional();
     if (wheels) {
       std::cout << "pulling car to different location" << std::endl;
     } else {

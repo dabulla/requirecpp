@@ -25,6 +25,11 @@ target_sources(requirecpp INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>/requirecpp/details/callback.hpp
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>/requirecpp/details/trackable_object.hpp)
 
+add_custom_target(documentation ALL
+    SOURCES
+      README.md
+)
+
 if(REQUIRECPP_TESTS)
     add_subdirectory(tests)
 endif()

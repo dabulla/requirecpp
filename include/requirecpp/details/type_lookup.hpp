@@ -21,6 +21,9 @@ struct DeclvalHelper {
 
 namespace requirecpp::details {
 
+// shared_ptr<T> -> T
+// T* -> T
+// const/ref T -> T
 template <typename T>
 static constexpr auto lookup_type() {
   if constexpr (is_specialization_of<std::shared_ptr, std::decay_t<T>>::value) {
