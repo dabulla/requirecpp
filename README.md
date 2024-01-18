@@ -1,6 +1,6 @@
 # requirecpp
 
-A framework that solves the chicken egg problem:
+A framework that solves the chicken egg problem.
 
 Chicken:
 ```cpp
@@ -51,15 +51,32 @@ Egg3000 laid by Chuck
 Chuck hatched from Egg3000
 ```
 
-Why didn't we just create the `Chicken` and `Egg` and then just call their methods?
-In bigger projects you might find more components with dependecies for the different functions they have and that's where `requirecpp` shines.
-Imagine there is a project with components `Database`, `UserService`, `Settings`, `InputReader`, `Webserver`, ... and they all depend upon each other.
-`requirecpp` takes the burden from you to care about the order of initialization and enables you to add in components easily, manage, find and debug cyclic dependecies.
-Lifecycle management of components can be handled cleanly in a multithreaded environment.
+The above example might seem trivial, but imagine your project with components like `Database`, `UserService`, `Settings`, `InputReader`, `Webserver`, ... and they all depend upon each other.
 
-- Can be used without infecting your precious components with a dependency to `requirecpp` (see examples for a `Chicken`/`Egg` variant that are not aware of `requirecpp`)
-- Components can be aware of `requirecpp` and manage their dependecies on their own. No glue code required to setup and compose your components.
-- Debug dependecies by printing unmet requirements and missing components
-- threadsafe, blocking and non-blocking calls. lazy loeading of components.
-- Use requirement callbacks with `shared_ptr`, references or copy-by-value depending on what you need. Remove and add objects to context whenever you want. However, components must live in `shared_ptr`s at the moment.
+`requirecpp` takes the burden off you and your team to care about the order of initialization and enables you to add in components easily, manage, find and debug cyclic dependecies.
+Your components lifecycles can be managed cleanly in a multithreaded environment. It leverages [Inversion of Control](https://en.wikipedia.org/wiki/Inversion_of_control) and dependecy injection patterns and is inspired by [RequireJS](https://github.com/requirejs/requirejs).  
+
+- Two Options to use it:
+  - Without infecting your precious components with a dependency to `requirecpp` (see examples for a [Chicken/Egg variant](examples/chicken-egg-unaware.cpp) that are not aware of `requirecpp`)
+  - Alternatively: Components can be aware of `requirecpp` and manage their dependecies on their own. No glue code required to setup and compose your components.
 - Use states/tags to mark that your components reached a certain state: `require<Tagged<MyWebserver, SocketState::LISTENING>()`
+- Debug dependecies by printing unmet requirements and missing components: (see [Car Assembly example](examples/car-assembly-states.cpp))
+  ```
+  interior(SteeringWheel [missing], Seats)
+  quality_control(Car<CarState::ASSEMBLED>, Car<CarState::INTERIOR_ASSEMBLED> [missing], Car<CarState::PAINTED>)
+  finish(Car<CarState::QUALITY_CONTROL_PASSED> [missing])
+  ```
+  (The car factory is `[missing]` a `SteeringWheel` component, so the interior cannot be assembled and quality control cannot be done. The car is already painted though.)
+- threadsafe, blocking and non-blocking calls. lazy loading of components.
+  - blocking: `context.get<Wheels>()->require()` (another thread has to call e.g. `context.push(summer_tires)`)
+  - non-blocking: `context.get<Wheels>()->optional()`
+- Remove and add objects to context whenever you want.
+- Use requirement callbacks with `shared_ptr`, **references** or **copy-by-value** depending on what you need.
+  ```
+  context.require(
+    [this](std::shared_ptr<Wheels> wheels, //< keep wheels object valid independent of requirecpp lifecycle
+           const Motor& motor,             //< object guaranteed to be valid until callback leaves scope
+           Seats seats) {                  //< an independent copy of seats object
+        // ... do stuff with wheels, motor and seats
+    }
+  ```
