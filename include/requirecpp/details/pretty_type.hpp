@@ -22,6 +22,8 @@ constexpr auto valuename() {
 namespace requirecpp::details {
 #ifdef __GNUG__
 
+
+namespace {
 template <auto State>
 struct PrettyValue {
   static std::string name() {
@@ -67,7 +69,11 @@ struct PrettyType<requirecpp::decorator::Tagged<T, State...>> {
     }
   }
 };
-
+}
+template <typename T>
+std::string type_pretty() {
+    return PrettyType<T>::name();
+}
 #else
 
 // demangle only for g++

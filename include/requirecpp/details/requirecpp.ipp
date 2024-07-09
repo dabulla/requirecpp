@@ -8,6 +8,12 @@
 
 namespace requirecpp {
 
+struct Context::details_callbacks {
+    std::deque<details::Callback> m_pending;
+};
+
+Context::Context() :m_details{std::make_unique<details_callbacks>()} {
+}
 Context::~Context() {
   for (auto dtor : m_destructors) {
     dtor();
@@ -40,14 +46,14 @@ void Context::require(Fn&& callback, const std::string& name) {
     cb.call(this);
   } else {
     // std::cout << "add pending: " << cb.declaration(this) << std::endl;
-    m_pending.emplace_back(std::move(cb));
+    m_details->m_pending.emplace_back(std::move(cb));
   }
 }
 
 std::vector<std::string> Context::list_pending(bool deps) const {
   std::vector<std::string> ret;
   std::scoped_lock lk{m_mutex};
-  for (const auto& cb : m_pending) {
+  for (const auto& cb : m_details->m_pending) {
     if (deps) {
       ret.emplace_back(cb.declaration(this));
     } else {
@@ -58,7 +64,7 @@ std::vector<std::string> Context::list_pending(bool deps) const {
 }
 void Context::print_pending(bool deps) const {
   std::scoped_lock lk{m_mutex};
-  if (m_pending.empty())
+  if (m_details->m_pending.empty())
     std::cout << "No pending requirements." << std::endl;
   else {
     auto v = list_pending(deps);
@@ -84,7 +90,7 @@ std::shared_ptr<LookupType<T>> Context::remove() {
 
 void Context::check_pending() {
   std::deque<details::Callback> cbs;
-  std::erase_if(m_pending, [&](auto& cb) {
+  std::erase_if(m_details->m_pending, [&](auto& cb) {
     bool satisfied = cb.satisfied(this);
     if (satisfied) {
       cbs.emplace_back(std::move(cb));

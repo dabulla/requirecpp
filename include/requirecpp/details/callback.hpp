@@ -117,8 +117,8 @@ class Callback {
     static std::unordered_map<std::string, bool> list(const Context* ctx) {
       bool satisfied = Satisfied<Dep>::satisfied(ctx);
       auto pair = std::make_pair(
-          /* type_pretty<Dep>() + " -> " + */ PrettyType<
-              LookupType<Dep>>::name(),
+          /* type_pretty<Dep>() + " -> " + */ type_pretty<
+              LookupType<Dep>>(),
           satisfied);
       auto set = DebugInfo<Deps...>::list(ctx);
       set.emplace(pair);

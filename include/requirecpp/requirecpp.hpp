@@ -21,7 +21,7 @@ using details::LookupType;
 
 class Context final {
  public:
-  Context() = default;
+  Context();
   Context(const Context&) = delete;
   Context(Context&&) = delete;
   Context& operator=(const Context&) = delete;
@@ -49,6 +49,7 @@ class Context final {
   void print_pending(bool deps = true) const;
 
  private:
+  struct details_callbacks;
   void check_pending();
 
   template <typename T>
@@ -57,9 +58,9 @@ class Context final {
   template <typename T>
   std::shared_ptr<details::TrackableObject<LookupType<T>>> lookup_set_create(
       std::shared_ptr<T> obj_ptr = nullptr);
-
+  std::unique_ptr<details_callbacks> m_details;
   mutable std::recursive_mutex m_mutex;
-  std::deque<details::Callback> m_pending;
+
   std::deque<std::function<void()>> m_destructors;
 
   template <typename T>
